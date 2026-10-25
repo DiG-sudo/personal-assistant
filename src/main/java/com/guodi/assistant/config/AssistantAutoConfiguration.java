@@ -125,14 +125,14 @@ public class AssistantAutoConfiguration {
     }
 
     @Bean
-    AgentRuntime agentRuntime(ChatModel model, ToolExecutor tools, AssistantProperties properties) {
+    AgentRuntime agentRuntime(ChatModel model, AssistantHarness harness, AssistantProperties properties) {
         var limits = properties.limits();
-        return new AgentRuntime(model, tools, limits.maxModelCalls(), limits.maxContextChars(), limits.maxToolsPerRound());
+        return new AgentRuntime(model, harness, limits.maxModelCalls(), limits.maxContextChars(), limits.maxToolsPerRound());
     }
 
     @Bean
-    AssistantHarness assistantHarness(AgentRuntime runtime, ConversationStore conversations,
-            MemoryModule memory, ContextBuilder context, ConversationGate gate, ExecutionManifest manifest) {
-        return new AssistantHarness(runtime, conversations, memory, context, gate, manifest);
+    AssistantHarness assistantHarness(ConversationStore conversations, MemoryModule memory,
+            ContextBuilder context, ToolExecutor tools, ConversationGate gate, ExecutionManifest manifest) {
+        return new AssistantHarness(conversations, memory, context, tools, gate, manifest);
     }
 }

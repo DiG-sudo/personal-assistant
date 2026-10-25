@@ -19,6 +19,7 @@ import com.guodi.assistant.config.AssistantAutoConfiguration;
 import com.guodi.assistant.config.AssistantProperties;
 import com.guodi.assistant.config.ReleaseManifestFactory;
 import com.guodi.assistant.core.AssistantHarness;
+import com.guodi.assistant.core.AgentRuntime;
 import com.guodi.assistant.domain.ConversationTurn;
 import com.guodi.assistant.versioning.ExecutionManifest;
 import com.guodi.assistant.versioning.ExecutionManifest.Ref;
@@ -59,17 +60,17 @@ class VersioningTest {
             original[0] = context.getBean(ExecutionManifest.class);
             assertThat(original[0].releaseId()).isEqualTo("assistant-harness-1.1.0");
             assertThat(original[0].components().get("toolExecutor").revision().version()).isEqualTo("1.1.0");
-            assertThat(original[0].settings()).containsKeys("executionSha256", "hooksSha256", "contextContractSha256");
+            assertThat(original[0].settings()).containsKeys("executionSha256", "contextContractSha256");
             assertThatThrownBy(() -> ((java.util.Map<?, ?>) original[0].settings().get("context")).clear())
                     .isInstanceOf(UnsupportedOperationException.class);
             var properties = context.getBean(AssistantProperties.class);
             var again = ReleaseManifestFactory.create(properties, original[0].prompt(),
                     context.getSourceApplicationContext().getBeanFactory(), context.getBean(ObjectMapper.class));
             assertThat(again.fingerprint()).isEqualTo(original[0].fingerprint());
-            var reply = context.getBean(AssistantHarness.class).chat("release-test", "hello");
+            var reply = context.getBean(AgentRuntime.class).chat("release-test", "hello");
             assertThat(reply.configurationId()).isEqualTo(original[0].fingerprint());
             var components = new com.guodi.assistant.web.ChatController(
-                    context.getBean(AssistantHarness.class), original[0]).components();
+                    context.getBean(AgentRuntime.class), context.getBean(AssistantHarness.class), original[0]).components();
             assertThat(components).containsEntry("mode", "demo")
                     .containsEntry("tools", List.of("current_time", "video_search_links"));
         });
@@ -80,7 +81,7 @@ class VersioningTest {
             assertThat(current.components().get("toolExecutor").revision().version()).isEqualTo("1.0.0");
             assertThat(current.fingerprint()).isNotEqualTo(original[0].fingerprint());
             var harness = context.getBean(AssistantHarness.class);
-            harness.chat("release-test", "hello again");
+            context.getBean(AgentRuntime.class).chat("release-test", "hello again");
             var turns = harness.history("release-test");
             assertThat(turns.getFirst().manifest()).isEqualTo(original[0]);
             assertThat(turns.getLast().manifest()).isEqualTo(current);

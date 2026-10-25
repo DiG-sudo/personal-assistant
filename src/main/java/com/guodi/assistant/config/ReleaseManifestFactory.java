@@ -18,7 +18,6 @@ import org.springframework.util.ClassUtils;
 import com.guodi.assistant.component.tool.VersionedToolCallback;
 import com.guodi.assistant.core.AgentRuntime;
 import com.guodi.assistant.core.AgentExecution;
-import com.guodi.assistant.core.RuntimeHooks;
 import com.guodi.assistant.core.AssistantHarness;
 import com.guodi.assistant.port.*;
 import com.guodi.assistant.versioning.ComponentRevision;
@@ -76,7 +75,6 @@ public final class ReleaseManifestFactory {
                 "harnessSha256", Fingerprints.implementationSha256(AssistantHarness.class),
                 "assemblySha256", Fingerprints.implementationSha256(AssistantAutoConfiguration.class),
                 "executionSha256", Fingerprints.implementationSha256(AgentExecution.class),
-                "hooksSha256", Fingerprints.implementationSha256(RuntimeHooks.class),
                 "contextContractSha256", Fingerprints.implementationSha256(ContextBuilder.class));
         var draft = new ExecutionManifest(properties.releaseId(), "", prompt, components, selectedTools, settings);
         try {

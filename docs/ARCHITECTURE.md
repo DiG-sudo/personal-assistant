@@ -6,18 +6,19 @@
 
 `web → core → port`；core 复用 versioning 的不可变快照和指纹函数；component 实现 port；config 负责装配。
 
-core 不依赖 component、HTTP、文件路径、模型厂商类或业务工具名称。Runtime 和 Harness 通过每次 run 传入的 RuntimeHooks 连接，没有构造器循环依赖、中间件注册器或优先级系统。
+core 不依赖 component、HTTP、文件路径、模型厂商类或业务工具名称。Runtime 直接持有具体 AssistantHarness；Harness.aroundRun 接收 this::runLoop，不注入 Runtime，没有构造器循环依赖。固定骨架之间使用普通方法调用，组件端口继续支持替换。
 
 ```text
-ChatController → AssistantHarness.chat → ConversationGate（finally 释放锁）
-  └─ aroundRun：恢复、保存 RUNNING、召回记忆
-       ├─ AgentRuntime.run：有界模型/工具循环
+ChatController → AgentRuntime.chat → AssistantHarness.aroundRun
+  └─ ConversationGate（finally 释放锁）→ executeTurn
+       ├─ restoreHistory → 保存 RUNNING → recallMemory
+       ├─ Runtime.runLoop：有界模型/工具循环
        │    ├─ aroundReasoning
        │    │    ├─ ContextBuilder.prepare：每步重建临时模型视图
        │    │    └─ aroundModelCall → ChatModel
        │    ├─ checkpoint：先提交 assistant 意图
        │    └─ aroundToolRound → ToolExecutor → checkpoint：提交工具结果
-       └─ 提交 COMPLETED → MemoryModule.observe → Reply
+       └─ 提交 COMPLETED → observeMemory → Reply
 ```
 
 | 位置 | 负责 | 调整示例 |
@@ -33,7 +34,7 @@ ChatController → AssistantHarness.chat → ConversationGate（finally 释放�
 | MemoryModule | 长期记忆的召回与更新 | 检索质量、记忆范围与格式 |
 | config / manifest | 启动选择、版本匹配和参数冻结 | 发布组合、组件版本 |
 
-RuntimeHooks 是明确的调用边界，不是通用插件框架。默认包装只调用一次真实操作，没有自动重试。模型包装接收 Prompt 和真实调用函数；即使以后包装内重复调用或调整请求，预算仍在每次真正请求之前检查。
+四个 around 方法直接定义在 AssistantHarness 中。aroundReasoning 构造完整 Prompt，aroundModelCall 接收真实调用函数，aroundToolRound 执行工具并提交结果。默认没有自动重试；Runtime.callModel 在每次真正请求前检查最终上下文和调用预算。主循环保留一个本轮 modelCall 函数，方法内部使用普通语句，不再把执行步骤放入通用日志回调。
 
 ## 状态所有权与提交
 
@@ -72,9 +73,9 @@ ContextBuilder.prepare 接收恢复历史、召回列表和当前已提交轮次
 | 对话保存失败 | 停止，不执行后续工具或模型；保存失败终态再次出错时附为 suppressed |
 | 记忆召回失败 | warning，使用对话历史继续；取消异常继续传播 |
 | 完成后的记忆更新失败 | warning，保留已提交的成功回答 |
-| 普通诊断日志 RuntimeException | 忽略日志故障，不影响权威提交 |
+| 上下文选择证据计算失败 | 跳过该次诊断，继续使用已经构造的模型输入 |
 
-阶段日志关联 turnId、stage、modelCalls 和耗时；每轮记录一次 releaseId/configurationId。召回阶段记录记忆内容摘要的 SHA-256 列表，上下文阶段记录选中/排除的 turn ID 和记忆索引，索引对应本轮召回摘要列表。工具阶段记录调用 ID 与名称，结果复用已有检查点。
+日志在对应方法中直接记录 turnId 和 stage；模型调用记录 modelCalls 与耗时，每轮记录 releaseId/configurationId。召回阶段记录记忆内容摘要的 SHA-256 列表，上下文阶段记录选中/排除的 turn ID 和记忆索引，索引对应本轮召回摘要列表。工具阶段记录调用 ID 与名称，结果复用已有检查点。
 
 日志默认输出终端，不作为恢复依据，不保存第二份工具结果或完整模型输入。配置指纹及召回摘要用于定位差异，不能保证复现外部返回或还原已经改变的记忆内容。
 
@@ -92,12 +93,12 @@ ContextBuilder.prepare 接收恢复历史、召回列表和当前已提交轮次
 
 新默认发布组合是 releases/harness-v2.yml（assistant-harness-1.1.0），选择 serial@1.1.0。baseline-v1.yml、compact-v1.yml、提示词资源和旧执行器行为保留。window 的选择算法未变，继续使用 1.0.0，由实现指纹标识观测与适配代码修订。
 
-新轮次仍使用 schemaVersion=2 固定 manifest；schemaVersion=1 保持可读且不补造版本。manifest 包含提示词原文/校验和、组件和工具版本、脱敏参数、类指纹及整体配置指纹。新骨架增加 AgentExecution、RuntimeHooks、ContextBuilder 契约指纹；组件指纹覆盖其继承实现和直接成员类，仍不代表所有传递依赖或外部服务版本。
+新轮次仍使用 schemaVersion=2 固定 manifest；schemaVersion=1 保持可读且不补造版本。manifest 包含提示词原文/校验和、组件和工具版本、脱敏参数、类指纹及整体配置指纹。当前快照记录 Runtime、Harness、装配、AgentExecution、ContextBuilder 契约指纹；旧轮次中已有的 hooksSha256 原样保留，新的快照不再记录已删除接口的指纹。组件指纹覆盖其继承实现和直接成员类，仍不代表所有传递依赖或外部服务版本。
 
 回退骨架行为需要切回对应 Git 修订和清单；单独选择旧清单只切换组件组合。详见 VERSIONING.md。
 
 ## 轻量验证
 
-本次只运行 15 项本地小检查：Runtime 的结束/协议/预算/工具意图与包装调用预算；Harness 的逐步上下文、工具结果保存失败、记忆更新降级、恢复不重放；上下文选择证据、执行器取消版本差异、版本快照保留、自定义 Bean 替换。
+本次可读性整理复用 18 项本地小检查：Runtime 的结束/协议/预算/工具意图与包装调用预算；Harness 的逐步上下文、工具结果保存失败、记忆故障降级、恢复不重放；版本选择、校验和、快照保留、旧记录读取，以及默认与自定义 Bean 装配。
 
-没有运行完整测试集、并发、浏览器、外部网络或真实模型检查。
+没有新增复杂测试，没有运行完整测试集、并发、浏览器、外部网络或真实模型检查。会话消息队列、steer 和 HTTP 取消仍处于设计阶段，本次保留现有 ConversationGate。

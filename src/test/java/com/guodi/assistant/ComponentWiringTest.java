@@ -19,6 +19,7 @@ import org.springframework.context.annotation.Bean;
 import com.guodi.assistant.component.memory.NoMemory;
 import com.guodi.assistant.config.AssistantAutoConfiguration;
 import com.guodi.assistant.core.AssistantHarness;
+import com.guodi.assistant.core.AgentRuntime;
 import com.guodi.assistant.port.*;
 
 import static org.assertj.core.api.Assertions.*;
@@ -33,7 +34,7 @@ class ComponentWiringTest {
             assertThat(context.getBean(MemoryModule.class)).isInstanceOf(NoMemory.class);
             var tools = context.getBean(ToolExecutor.class);
             assertThat(tools.callbacks()).extracting(tool -> tool.getToolDefinition().name()).containsExactly("current_time");
-            var answer = context.getBean(AssistantHarness.class).chat("demo", "现在几点");
+            var answer = context.getBean(AgentRuntime.class).chat("demo", "现在几点");
             assertThat(answer.modelCalls()).isEqualTo(2);
             assertThat(answer.answer()).contains("current_time");
         });
@@ -47,9 +48,9 @@ class ComponentWiringTest {
                 "assistant.components.tool-executor.version=1.0.0").run(context -> {
             assertThat(context).hasNotFailed().hasSingleBean(ChatModel.class).hasSingleBean(MemoryModule.class)
                     .hasSingleBean(ConversationStore.class).hasSingleBean(ContextBuilder.class).hasSingleBean(ToolExecutor.class);
-            var reply = context.getBean(AssistantHarness.class).chat("custom", "hello");
+            var reply = context.getBean(AgentRuntime.class).chat("custom", "hello");
             assertThat(reply.answer()).isEqualTo("custom answer");
-            assertThat(new com.guodi.assistant.web.ChatController(context.getBean(AssistantHarness.class),
+            assertThat(new com.guodi.assistant.web.ChatController(context.getBean(AgentRuntime.class), context.getBean(AssistantHarness.class),
                     context.getBean(com.guodi.assistant.versioning.ExecutionManifest.class)).components())
                     .containsEntry("mode", "live");
             assertThat(context.getBean(ConversationStore.class).load("custom")).hasSize(1);

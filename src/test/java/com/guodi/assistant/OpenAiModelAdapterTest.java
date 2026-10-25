@@ -15,6 +15,7 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 import com.guodi.assistant.config.AssistantAutoConfiguration;
 import com.guodi.assistant.core.AssistantHarness;
+import com.guodi.assistant.core.AgentRuntime;
 import com.guodi.assistant.domain.ConversationTurn;
 
 import static org.assertj.core.api.Assertions.*;
@@ -48,7 +49,7 @@ class OpenAiModelAdapterTest {
             runner(server).run(context -> {
                 assertThat(context).hasNotFailed();
                 var harness = context.getBean(AssistantHarness.class);
-                var reply = harness.chat("provider", "现在几点");
+                var reply = context.getBean(AgentRuntime.class).chat("provider", "现在几点");
                 assertThat(reply.modelCalls()).isEqualTo(2);
                 assertThat(reply.answer()).isEqualTo("fixture final answer");
                 assertThat(harness.history("provider").getFirst().messages()).hasSize(4);
@@ -80,7 +81,7 @@ class OpenAiModelAdapterTest {
             runner(server).run(context -> {
                 assertThat(context).hasNotFailed();
                 var harness = context.getBean(AssistantHarness.class);
-                assertThatThrownBy(() -> harness.chat("failed-provider", "hello")).isInstanceOf(RuntimeException.class);
+                assertThatThrownBy(() -> context.getBean(AgentRuntime.class).chat("failed-provider", "hello")).isInstanceOf(RuntimeException.class);
                 assertThat(attempts.get()).isEqualTo(1);
                 assertThat(harness.history("failed-provider").getFirst().status()).isEqualTo(ConversationTurn.Status.FAILED);
             });

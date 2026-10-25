@@ -107,10 +107,13 @@ observe 只接收已提交的成功轮次，不修改原始聊天。更换实现
 
 ## 调整执行策略的位置
 
-- 一轮恢复、提交和记忆时机：AssistantHarness.aroundRun。
-- 每步上下文构造：aroundReasoning 调用 ContextBuilder.prepare。
+- 聊天执行入口：AgentRuntime.chat，通过 this::runLoop 将循环交给 Harness 生命周期。
+- 一轮恢复、提交和记忆时机：AssistantHarness.aroundRun；executeTurn 直接调用 restoreHistory、recallMemory、observeMemory 等方法。
+- 每步上下文构造：aroundReasoning 调用 ContextBuilder.prepare，并用已选工具定义构造 Prompt。
 - 真实模型请求的包装：aroundModelCall；真实调用函数接受 Prompt，Runtime 在调用前检查最终请求和计数。当前没有自动重试。
-- 工具组的执行包装：aroundToolRound；允许列表、顺序和普通业务错误属于 ToolExecutor。
+- 工具组执行和结果检查点：aroundToolRound；允许列表、顺序和普通业务错误属于 ToolExecutor。
 - 权威检查点：Harness.checkpoint / commit。工具意图成功保存后才执行，禁止包装层自动重放不确定的外部副作用。
 
 不要在策略组件中重新保存对话或维护另一份消息列表。新增资源由相应执行边界负责 finally 清理。
+
+固定 Runtime/Harness 直接协作，不设置额外的协调接口。模型、记忆、上下文、工具执行器与存储的组件契约保留。

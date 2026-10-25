@@ -4,7 +4,9 @@
 
 - core/AgentRuntime owns only the model/tool loop and its execution budget.
 - core/AssistantHarness owns conversation serialization, persistence and lifecycle through explicit aroundRun/reasoning/model/tool boundaries.
-- Pass RuntimeHooks per run; AgentExecution holds one committed turn cursor and actual request count. Never add a second mutable transcript.
+- AgentRuntime depends on the concrete AssistantHarness. aroundRun accepts the loop method reference; Harness never injects Runtime.
+- AgentExecution holds one committed turn cursor and actual request count. Never add a second mutable transcript.
+- Keep lifecycle and loop code as ordinary Java statements. Log in the owning method instead of wrapping stages in generic callbacks.
 - Build transient context before each reasoning step. Keep diagnostic logging separate from authoritative checkpoints.
 - port/ owns stable component contracts. Use Spring AI ChatModel and ToolCallback directly.
 - component/ owns default implementations; extension/ may provide user components.

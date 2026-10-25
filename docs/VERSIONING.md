@@ -154,6 +154,12 @@ mvn -Dtest=VersioningTest test
 
 ## Harness 修订的归因
 
-每轮 manifest 继续保存原始发布与配置，schemaVersion 仍为 2。新骨架额外记录 AgentExecution、RuntimeHooks、ContextBuilder 的类指纹；组件与骨架类指纹包含继承实现和直接成员类，防止共享基类或选择证据记录类型变化被遗漏。工具的具体实现、Schema 和版本继续由原工具快照记录。
+每轮 manifest 继续保存原始发布与配置，schemaVersion 仍为 2。当前骨架记录 AgentExecution、ContextBuilder 契约及 Runtime、Harness、装配类指纹；组件与骨架类指纹包含继承实现和直接成员类，防止共享基类或选择证据记录类型变化被遗漏。旧轮次中已有的 hooksSha256 保留在原始 manifest 中，新轮次不再包含已删除接口的指纹。工具的具体实现、Schema 和版本继续由原工具快照记录。
 
 指纹不覆盖所有传递依赖、外部模型或记忆内容；依赖仍由 pom.xml 与 Git 修订管理。回放和完整模型输入归档尚未实现。
+
+## 可读性整理
+
+本次将调用方向整理为 Runtime → 具体 Harness，aroundRun 接收循环方法引用，删除仅由 Harness 实现的协调接口以及 stage/diagnostic 回调包装。HTTP 输入输出、组件算法、提示词、预算与持久化数据格式保持原有行为。
+
+这是骨架内部重构，继续使用 assistant-harness-1.1.0 发布组合；不改已发布清单、提示词或旧标签。新 Git 修订和实现指纹识别这次源码变化；回退骨架时同时切换对应 Git 修订。

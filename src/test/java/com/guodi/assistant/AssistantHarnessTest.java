@@ -105,18 +105,19 @@ class AssistantHarnessTest {
         var calls = new AtomicInteger();
         var counter = new AgentRuntimeTest.CountingTool();
         var tools = new RegisteredToolExecutor(List.of(org.springframework.ai.support.ToolCallbacks.from(counter)), 1000);
-        var runtime = new AgentRuntime(prompt -> {
+        ChatModel model = prompt -> {
             int call = calls.incrementAndGet();
             assertThat(prompt.getInstructions().getFirst().getText()).isEqualTo("view-" + call);
             if (call == 1) return TestSupport.tool("c1", "count");
             assertThat(prompt.getInstructions().getLast()).isInstanceOf(org.springframework.ai.chat.messages.ToolResponseMessage.class);
             return TestSupport.text("done");
-        }, tools, 3, 10000, 4);
+        };
         com.guodi.assistant.port.ContextBuilder context = (history, memories, message) -> List.of(
                 new org.springframework.ai.chat.messages.SystemMessage("view-" + builds.incrementAndGet()),
                 new org.springframework.ai.chat.messages.UserMessage(message));
-        var reply = new AssistantHarness(runtime, store, new NoMemory(), context,
-                new ConversationGate(), TestSupport.manifest()).chat("a", "hello");
+        var harness = new AssistantHarness(store, new NoMemory(), context, tools,
+                new ConversationGate(), TestSupport.manifest());
+        var reply = new AgentRuntime(model, harness, 3, 10000, 4).chat("a", "hello");
         assertThat(reply.modelCalls()).isEqualTo(2);
         assertThat(builds.get()).isEqualTo(2);
         assertThat(store.load("a").getFirst().messages()).extracting(TranscriptMessage::role)
@@ -137,13 +138,14 @@ class AssistantHarnessTest {
                 store.save(id, turn);
             }
         };
-        var runtime = new AgentRuntime(prompt -> {
+        ChatModel model = prompt -> {
             calls.incrementAndGet();
             return TestSupport.tool("c1", "count");
-        }, tools, 3, 10000, 4);
-        var harness = new AssistantHarness(runtime, brokenStore, new NoMemory(),
-                new WindowContextBuilder("system", 8, 6000, 1000), new ConversationGate(), TestSupport.manifest());
-        assertThatThrownBy(() -> harness.chat("a", "hello")).hasMessageContaining("result save failed");
+        };
+        var harness = new AssistantHarness(brokenStore, new NoMemory(),
+                new WindowContextBuilder("system", 8, 6000, 1000), tools, new ConversationGate(), TestSupport.manifest());
+        var runtime = new AgentRuntime(model, harness, 3, 10000, 4);
+        assertThatThrownBy(() -> runtime.chat("a", "hello")).hasMessageContaining("result save failed");
         assertThat(calls.get()).isEqualTo(1);
         assertThat(counter.executions.get()).isEqualTo(1);
         var failed = store.load("a").getFirst();
@@ -192,10 +194,11 @@ class AssistantHarnessTest {
         }
     }
 
-    private AssistantHarness harness(ChatModel model, MemoryModule memory) {
+    private AgentRuntime harness(ChatModel model, MemoryModule memory) {
         var tools = new RegisteredToolExecutor(List.of(), 1000);
-        return new AssistantHarness(new AgentRuntime(model, tools, 4, 10000, 4), store, memory,
-                new WindowContextBuilder("system", 8, 6000, 1000), new ConversationGate(), TestSupport.manifest());
+        var harness = new AssistantHarness(store, memory,
+                new WindowContextBuilder("system", 8, 6000, 1000), tools, new ConversationGate(), TestSupport.manifest());
+        return new AgentRuntime(model, harness, 4, 10000, 4);
     }
 
     private static void await(CountDownLatch latch) {

@@ -45,10 +45,10 @@ ASSISTANT_RELEASE=classpath:releases/compact-v1.yml mvn spring-boot:run
 
 ```mermaid
 flowchart TD
-    A[聊天入口] --> B[AssistantHarness]
-    B --> C[AgentRuntime]
+    A[聊天入口] --> C[AgentRuntime]
+    C --> B[AssistantHarness]
     C --> D[ChatModel]
-    C --> E[ToolExecutor]
+    B --> E[ToolExecutor]
     E --> F[版本化工具]
     B --> G[ConversationStore]
     B --> H[MemoryModule]
@@ -71,7 +71,7 @@ flowchart TD
 
 核心循环不解释业务工具名或组件版本。用户 Bean 替换对应默认组件，启动时核对实现版本与清单一致。工具支持同时注册多个实现版本，再按清单选择其中一个。
 
-每次模型推理前重新调用上下文组件，临时模型视图不修改已保存记录。RuntimeHooks 在 run 时传入，Harness 与 Runtime 没有构造器循环依赖。
+每次模型推理前重新调用上下文组件，临时模型视图不修改已保存记录。调用方向为 Controller → Runtime.chat → Harness.aroundRun → Runtime.runLoop；Harness 接收循环的方法引用，不反向依赖 Runtime。
 
 排查问题先按 turnId 查阶段日志：memory.recall → context → model → persistence → tools → memory.observe；版本查本轮 manifest。职责表和错误处理见 [架构](docs/ARCHITECTURE.md)。日志不保存完整模型输入，也不替代恢复检查点。
 
