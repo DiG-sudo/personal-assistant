@@ -1,106 +1,103 @@
 # 当前架构
 
-本文描述已经实现的骨架与约束，不将尚未实现的扩展写成现有能力。
+本文只描述已实现的职责与约束。
 
-## 依赖方向
+## 依赖与执行边界
 
-`web → core → port；core → versioning 的不可变快照类型`；`component → port`；`config` 装配全部实现。
+`web → core → port`；core 复用 versioning 的不可变快照和指纹函数；component 实现 port；config 负责装配。
 
-`core` 不依赖 `component`、HTTP、磁盘路径或模型厂商类。Spring AI 的消息和工具类型作为现成协议复用。Runtime 与 Harness 不注册业务工具，也不根据工具名判断业务是否完成。
+core 不依赖 component、HTTP、文件路径、模型厂商类或业务工具名称。Runtime 和 Harness 通过每次 run 传入的 RuntimeHooks 连接，没有构造器循环依赖、中间件注册器或优先级系统。
 
-## 一轮聊天
+```text
+ChatController → AssistantHarness.chat → ConversationGate（finally 释放锁）
+  └─ aroundRun：恢复、保存 RUNNING、召回记忆
+       ├─ AgentRuntime.run：有界模型/工具循环
+       │    ├─ aroundReasoning
+       │    │    ├─ ContextBuilder.prepare：每步重建临时模型视图
+       │    │    └─ aroundModelCall → ChatModel
+       │    ├─ checkpoint：先提交 assistant 意图
+       │    └─ aroundToolRound → ToolExecutor → checkpoint：提交工具结果
+       └─ 提交 COMPLETED → MemoryModule.observe → Reply
+```
 
-1. HTTP 入口检查会话 ID 和输入长度。
-2. Harness 获取会话锁，加载历史。
-3. 上次残留 RUNNING 轮次标记 FAILED，保留意图和已有结果。
-4. 调用记忆组件 recall。失败时产生 warning，继续使用聊天记录。
-5. 创建并保存 RUNNING 轮次，将启动时已核对的 ExecutionManifest 固定到本轮。
-6. 上下文组件构造模型视图，最后放入当前 UserMessage。
-7. Runtime 调用模型，明确禁用 Spring AI 内部自动工具执行。
-8. 模型返回工具请求时，保存 AssistantMessage 意图后执行注册工具；保存 ToolResponseMessage 后继续推理。
-9. 普通最终文本完成最后一次检查点后，Runtime 只返回模型调用次数。Harness 从已提交检查点标记 COMPLETED 并生成回答，不重复传递消息。
-10. 调用记忆组件 observe。更新失败只产生 warning，不重新执行模型。
-11. 释放会话锁，返回回答和 warnings。
+| 位置 | 负责 | 调整示例 |
+| --- | --- | --- |
+| AgentRuntime | 循环推进、模型协议检查、实际请求预算、意图与结果的检查点顺序 | 停止条件、模型响应格式 |
+| Harness.aroundRun | 恢复、终态提交、记忆失败降级与本轮生命周期 | 中断处理、记忆补偿时机 |
+| Harness.aroundReasoning | 把当前执行快照交给上下文策略，再启动推理 | 上下文构造时机 |
+| ContextBuilder.prepare | 当前模型输入和选择证据，不修改聊天事实 | 历史选择、记忆裁剪、摘要策略 |
+| Harness.aroundModelCall | 包装真实模型请求，当前记录阶段与耗时 | 请求策略、错误分类；网络超时仍由适配器实现 |
+| Harness.aroundToolRound | 包装一组真实工具执行 | 整组执行权限、停止策略 |
+| ToolExecutor | 同一允许列表控制暴露与执行，工具顺序及普通错误结果 | 单个工具失败、输出截断 |
+| ConversationStore | 单个 turn 的原子替换 | 保存与读取故障 |
+| MemoryModule | 长期记忆的召回与更新 | 检索质量、记忆范围与格式 |
+| config / manifest | 启动选择、版本匹配和参数冻结 | 发布组合、组件版本 |
 
-模型响应、持久化和工具输入是实际边界。运行中不反复查询或校验 Harness 已经建立的内部状态。
+RuntimeHooks 是明确的调用边界，不是通用插件框架。默认包装只调用一次真实操作，没有自动重试。模型包装接收 Prompt 和真实调用函数；即使以后包装内重复调用或调整请求，预算仍在每次真正请求之前检查。
 
-## 状态所有权
+## 状态所有权与提交
+
+每轮创建一个 AgentExecution，不能挂在单例 Bean 的可变字段中。
 
 | 数据 | 权威来源 | 写入者 |
 | --- | --- | --- |
-| 已保存会话轮次 | ConversationStore | Harness |
-| 本轮运行消息 | Runtime 的工作列表 | Runtime |
-| 当前已保存检查点游标 | Harness | Harness |
-| 长期记忆 | 当前 MemoryModule 实现 | MemoryModule.observe |
-| 本次模型上下文 | ContextBuilder 的临时结果 | ContextBuilder；Runtime 追加本轮消息 |
+| 已提交消息与状态 | ConversationStore；AgentExecution.turn 是最近成功提交的游标 | Harness.commit |
+| 恢复历史、召回结果 | 本轮固定的只读列表 | Harness 在恢复、召回阶段设置 |
+| 实际模型调用次数 | AgentExecution.modelCalls | Runtime，在真实请求前递增 |
+| 长期记忆 | MemoryModule 的存储 | MemoryModule.observe |
+| 本次模型输入 | ContextBuilder.ModelContext | ContextBuilder，每次推理重新构造 |
+| 版本与参数 | 本轮 ConversationTurn.manifest | 启动装配后固定 |
 
-Runtime 的工作状态和已提交检查点有不同生命周期。检查点保存成功后才推进 Harness 游标；提交失败即退出，不使用未提交状态继续推理。持久化格式包含 schemaVersion，读取未知版本时拒绝静默解释。
+Runtime 不再维护另一份可变消息列表，也不返回重复的调用次数；Harness 从执行状态和已提交轮次生成回答。checkpoint 每次追加一个消息，保存成功后才推进游标。提交失败立即退出，失败记录保留最后成功提交的消息；不把未保存的工具结果当成已提交事实。
 
-对话记录保留历史事实；长期记忆可以另行提取、迁移和替换；上下文是有界视图，不是第三份可独立编辑的记忆。
-
-## 工具边界
-
-ToolExecutor.callbacks 与 execute 必须使用同一允许列表。默认实现从版本化 ToolCallback Bean 收集候选，按发布清单精确选择。重复名称或缺失版本导致启动失败。禁用工具不会被暴露给模型，也无法通过猜测名称执行。
-
-默认串行执行所有工具，并保持模型请求顺序。普通工具参数或执行错误转换为结果，交给模型修正；Error 与持久化故障传播到生命周期边界。
-
-工具返回值在默认执行器内截断；保存的也是这个有界结果。若需要完整原始产物，应由具体工具保存到独立产物存储并返回引用。
+对话轮次状态是 RUNNING → COMPLETED / FAILED。恢复时将残留 RUNNING 标记 FAILED，并更新本轮历史视图。中断时外部工具结果可能未知，不自动重放。回答成功提交后才更新记忆，记忆故障不回滚回答或重新调用模型。
 
 ## 上下文与预算
 
-上下文组件只选择 COMPLETED 的完整轮次，保留工具请求与结果配对。固定 system prompt、选中的记忆、历史轮次和当前输入构成初始请求。Runtime 每次调用前检查总消息字符上限。
+ContextBuilder.prepare 接收恢复历史、召回列表和当前已提交轮次的全部消息。默认 window@1.0.0 仍选择最近完整成功轮次和有界记忆，保持相同选择算法；prepare 增加选择证据，并接上完整的本轮消息。
 
-默认上下文策略不裁剪本轮已执行工具历史。超过上限时停止并保存 FAILED，防止反复提交相同超限请求。精确 token 预算尚未实现。
+原 build(history, memories, userMessage) 契约保留。只实现 build 的自定义组件由默认 prepare 适配：每步调用 build，再追加本轮 assistant/tool 交换；选择证据标记为 unreported，不推测选择结果。需要基于工具结果动态调整上下文时覆盖 prepare。
 
-最后一个可用模型调用若继续请求工具，先保留意图，再停止；不会在没有后续模型预算时执行新的外部操作。
+临时模型视图不写回对话，不允许通过上下文裁剪删除原始记录。默认策略不裁剪本轮工具历史，保留工具请求与结果的 ID 和配对。当前持久协议只支持文本和工具消息；供应商专属推理元数据、多模态消息需要先扩展数据协议。
+
+最终发送请求前检查字符预算；预算不含供应商封装和工具定义开销，尚未精确计算 token。模型实际请求（包括失败请求）计入 modelCalls。达到最后请求预算但仍要求工具时，保存意图后停止，不执行没有后续推理预算的新工具。外层循环同时保留固定上限。
+
+## 错误、观测与清理
+
+| 故障 | 当前行为 |
+| --- | --- |
+| 模型网络异常、非法响应、预算不足 | 停止，尽力保存 FAILED，原异常继续传播 |
+| 普通工具参数或业务异常 | 执行器返回失败内容，模型可以继续纠正 |
+| serial@1.1.0 收到取消异常（包括工具反射包装中的取消） | 向外传播，停止本轮；serial@1.0.0 保留旧行为 |
+| 对话保存失败 | 停止，不执行后续工具或模型；保存失败终态再次出错时附为 suppressed |
+| 记忆召回失败 | warning，使用对话历史继续；取消异常继续传播 |
+| 完成后的记忆更新失败 | warning，保留已提交的成功回答 |
+| 普通诊断日志 RuntimeException | 忽略日志故障，不影响权威提交 |
+
+阶段日志关联 turnId、stage、modelCalls 和耗时；每轮记录一次 releaseId/configurationId。召回阶段记录记忆内容摘要的 SHA-256 列表，上下文阶段记录选中/排除的 turn ID 和记忆索引，索引对应本轮召回摘要列表。工具阶段记录调用 ID 与名称，结果复用已有检查点。
+
+日志默认输出终端，不作为恢复依据，不保存第二份工具结果或完整模型输入。配置指纹及召回摘要用于定位差异，不能保证复现外部返回或还原已经改变的记忆内容。
+
+锁由 ConversationGate 的 finally 释放，覆盖 RuntimeException、取消和 Error。当前没有额外的每轮外部资源；未来新增资源必须在拥有它的 around 边界用 finally/try-with-resources 清理。当前没有 HTTP 取消入口，也不承诺中断一个不响应取消的同步工具。
 
 ## 文件与并发
 
-每个 turn 一个 JSON 文件，每次检查点原子替换同一个路径。按 startedAt、turn ID 排序恢复。会话目录名采用 Base64 URL 编码，工具不能提供文件路径。
+每个 turn 一个 JSON 文件，同目录临时文件加原子替换；按 startedAt、turn ID 排序恢复。会话目录名采用 Base64 URL 编码，工具不提供文件路径。没有 fsync，不承诺断电级持久化。
 
-会话锁是单进程的 64 条带锁，覆盖恢复、模型调用、持久化和记忆更新。读历史接口也经过同一锁，避免暴露运行中不同检查点混合视图。条带碰撞可能使无关会话暂时串行。
+单进程的 64 条带锁覆盖恢复、模型、提交与记忆更新。历史读取也经过同一锁。条带碰撞可能使无关会话暂时串行；两个进程不能共用数据目录。
 
-原子重命名保证进程中断时不会读到半个 JSON 文件；未实现 fsync，不能承诺断电级持久化。
+## 组件与版本
 
-## 扩展方式
+默认 Bean 用 ConditionalOnMissingBean 退出，用户组件优先。模型复用 Spring AI ChatModel，工具复用版本化 ToolCallback。工具名称/版本精确匹配清单，未知、重复版本拒绝启动，没有 latest 回退。热加载、后台工作流和动态插件安装未实现。
 
-默认组件放在自动配置中，用户配置优先。扩展包新增 Bean，默认组件用 ConditionalOnMissingBean 退出；改变内置选择可调整配置。核心类保持普通 Java 类，由装配层显式构造。
+新默认发布组合是 releases/harness-v2.yml（assistant-harness-1.1.0），选择 serial@1.1.0。baseline-v1.yml、compact-v1.yml、提示词资源和旧执行器行为保留。window 的选择算法未变，继续使用 1.0.0，由实现指纹标识观测与适配代码修订。
 
-插拔在进程启动时确定。新工具用 VersionedToolCallback 包装原生 ToolCallback；记忆用 MemoryModule；模型复用 ChatModel；入口直接调用 Harness。热加载、插件安装、自动修改代码不属于当前骨架。
+新轮次仍使用 schemaVersion=2 固定 manifest；schemaVersion=1 保持可读且不补造版本。manifest 包含提示词原文/校验和、组件和工具版本、脱敏参数、类指纹及整体配置指纹。新骨架增加 AgentExecution、RuntimeHooks、ContextBuilder 契约指纹；组件指纹覆盖其继承实现和直接成员类，仍不代表所有传递依赖或外部服务版本。
 
-## 测试对应
+回退骨架行为需要切回对应 Git 修订和清单；单独选择旧清单只切换组件组合。详见 VERSIONING.md。
 
-- AgentRuntimeTest：普通结束、工具配对、预算、模型边界、先保存意图。
-- AssistantHarnessTest：恢复、会话串行、失败保存、记忆故障隔离。
-- ContextAndStorageTest：上下文完整轮选择、JSON 恢复、会话隔离、数据版本。
-- RegisteredToolExecutorTest：允许列表、重复名、顺序、截断、参数失败。
-- ComponentWiringTest：自定义 Bean 替换、追加工具、配置校验。
-- ChatApiTest：真实 Spring 应用装配、HTTP 校验、备注与工具链路。
+## 轻量验证
 
-- OpenAiModelAdapterTest：本地 HTTP 替身验证真实适配器的端点、手动工具循环与无自动重试。
+本次只运行 15 项本地小检查：Runtime 的结束/协议/预算/工具意图与包装调用预算；Harness 的逐步上下文、工具结果保存失败、记忆更新降级、恢复不重放；上下文选择证据、执行器取消版本差异、版本快照保留、自定义 Bean 替换。
 
-## 版本与运行快照
-
-- application.yml 使用 Spring 配置导入选择 releases/baseline-v1.yml 等冻结清单。
-- PromptSnapshot 在启动时读取并验证 SHA-256，默认上下文组件和快照共用同一份内容。
-- ComponentRevision 可在实现类或 Bean 工厂方法声明；实现类优先。装配后核对记忆、上下文、存储和执行器与清单相符。
-- VersionedToolCallback 绑定实际回调、版本、Schema 和实现类指纹。候选可并存多个版本，实际只暴露选中的版本。
-- ExecutionManifest 保存发布 ID、提示词原文与摘要、组件和工具元数据、参数及整体指纹；自定义参数由 ConfigurationSnapshot 显式提供，不反射读取字段或密钥。
-- 参数使用 JSON 值；指纹计算对 Map 键排序，避免字典迭代顺序造成伪差异。
-- Harness 创建轮次时固定 manifest，后续检查点、完成和失败均保留原快照。Runtime 无版本解析逻辑。
-- 新聊天 schemaVersion=2 必须包含 manifest。旧 schemaVersion=1 可继续读取，manifest 保持 null，不能补写成当前版本。
-- 聊天响应返回 releaseId/configurationId，组件查询返回当前 manifest。快照不会调用模型或工具，也不代表外部返回值可完全复现。
-
-本次版本化验证只运行 VersioningTest 的四项本地检查及一项组件替换装配检查。未运行浏览器、外部模型、并发或完整回归测试。
-
-## 精简后的职责来源
-
-- 最后成功提交的 ConversationTurn 是本轮回答的来源。Runtime 不再返回重复消息 Result，complete() 直接使用当前记录的消息。
-- ReleaseManifestFactory 从同一 BeanFactory 解析实际组件，不同时接收容器和容器中已有的五个组件。resolveNamedBean 保留 Spring 的组件选择规则。
-- ChatController 的模式和工具信息读取已核对的 manifest，不额外注入模型、工具执行器来重复组装元数据。
-- 默认工具注册表在构造时用 TreeMap 固定名称顺序，callbacks() 不再反复排序。
-- 上下文和预算参数直接从配置记录转换为 JSON Map，模型连接参数继续使用不含密钥的白名单。
-
-本次为行为等价的内部精简，提示词与发布清单保持原版本；原始实现保留在 Git 基线中，新提交和实现指纹区分源码修订。
-
-本次精简复用 9 项本地小检查，覆盖普通结束、工具配对、预算、检查点失败、元信息、工具顺序和组件替换；未运行完整测试集、浏览器、并发或外部模型检查。
+没有运行完整测试集、并发、浏览器、外部网络或真实模型检查。

@@ -1,6 +1,6 @@
 spring:
   config:
-    import: ${ASSISTANT_RELEASE:classpath:releases/baseline-v1.yml}
+    import: ${ASSISTANT_RELEASE:classpath:releases/harness-v2.yml}
 
 server:
   address: 127.0.0.1

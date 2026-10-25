@@ -95,7 +95,12 @@ public class AssistantAutoConfiguration {
     @ConditionalOnMissingBean
     ToolExecutor toolExecutor(ObjectProvider<ToolCallback> callbacks, AssistantProperties properties) {
         var selected = VersionedToolCallback.select(callbacks.orderedStream().toList(), properties.tools());
-        return new RegisteredToolExecutor(selected, properties.limits().toolResultChars());
+        int resultChars = properties.limits().toolResultChars();
+        return switch (properties.components().toolExecutor().version()) {
+            case "1.0.0" -> new RegisteredToolExecutor(selected, resultChars);
+            case "1.1.0" -> new CancellableToolExecutor(selected, resultChars);
+            default -> throw new IllegalStateException("Register the requested ToolExecutor as a versioned Bean");
+        };
     }
 
     @Bean

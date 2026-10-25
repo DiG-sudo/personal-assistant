@@ -15,7 +15,7 @@ import com.guodi.assistant.port.ToolExecutor;
 
 /** One allowlist controls exposure and execution. Tools run sequentially in model call order. */
 @com.guodi.assistant.versioning.ComponentRevision(id = "serial", version = "1.0.0")
-public final class RegisteredToolExecutor implements ToolExecutor {
+public class RegisteredToolExecutor implements ToolExecutor {
     private final Map<String, ToolCallback> tools;
     private final int resultChars;
 
@@ -51,7 +51,7 @@ public final class RegisteredToolExecutor implements ToolExecutor {
                         content = "";
                     }
                 } catch (RuntimeException error) {
-                    content = "工具执行失败：" + error.getMessage();
+                    content = failureResult(error);
                 }
             }
             if (content.length() > resultChars) {
@@ -60,5 +60,9 @@ public final class RegisteredToolExecutor implements ToolExecutor {
             results.add(new ToolResponse(call.id(), call.name(), content));
         }
         return List.copyOf(results);
+    }
+
+    protected String failureResult(RuntimeException error) {
+        return "工具执行失败：" + error.getMessage();
     }
 }

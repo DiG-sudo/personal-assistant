@@ -100,6 +100,58 @@ class AssistantHarnessTest {
     }
 
     @Test
+    void rebuildsContextForEachStepWithoutSavingTheTransientView() {
+        var builds = new AtomicInteger();
+        var calls = new AtomicInteger();
+        var counter = new AgentRuntimeTest.CountingTool();
+        var tools = new RegisteredToolExecutor(List.of(org.springframework.ai.support.ToolCallbacks.from(counter)), 1000);
+        var runtime = new AgentRuntime(prompt -> {
+            int call = calls.incrementAndGet();
+            assertThat(prompt.getInstructions().getFirst().getText()).isEqualTo("view-" + call);
+            if (call == 1) return TestSupport.tool("c1", "count");
+            assertThat(prompt.getInstructions().getLast()).isInstanceOf(org.springframework.ai.chat.messages.ToolResponseMessage.class);
+            return TestSupport.text("done");
+        }, tools, 3, 10000, 4);
+        com.guodi.assistant.port.ContextBuilder context = (history, memories, message) -> List.of(
+                new org.springframework.ai.chat.messages.SystemMessage("view-" + builds.incrementAndGet()),
+                new org.springframework.ai.chat.messages.UserMessage(message));
+        var reply = new AssistantHarness(runtime, store, new NoMemory(), context,
+                new ConversationGate(), TestSupport.manifest()).chat("a", "hello");
+        assertThat(reply.modelCalls()).isEqualTo(2);
+        assertThat(builds.get()).isEqualTo(2);
+        assertThat(store.load("a").getFirst().messages()).extracting(TranscriptMessage::role)
+                .containsExactly("user", "assistant", "tool", "assistant");
+    }
+
+    @Test
+    void resultSaveFailureKeepsOnlyCommittedIntentAndStopsBeforeAnotherModelCall() {
+        var calls = new AtomicInteger();
+        var counter = new AgentRuntimeTest.CountingTool();
+        var tools = new RegisteredToolExecutor(List.of(org.springframework.ai.support.ToolCallbacks.from(counter)), 1000);
+        com.guodi.assistant.port.ConversationStore brokenStore = new com.guodi.assistant.port.ConversationStore() {
+            public List<ConversationTurn> load(String id) { return store.load(id); }
+            public void save(String id, ConversationTurn turn) {
+                if (turn.status() == ConversationTurn.Status.RUNNING && turn.messages().getLast().role().equals("tool")) {
+                    throw new IllegalStateException("result save failed");
+                }
+                store.save(id, turn);
+            }
+        };
+        var runtime = new AgentRuntime(prompt -> {
+            calls.incrementAndGet();
+            return TestSupport.tool("c1", "count");
+        }, tools, 3, 10000, 4);
+        var harness = new AssistantHarness(runtime, brokenStore, new NoMemory(),
+                new WindowContextBuilder("system", 8, 6000, 1000), new ConversationGate(), TestSupport.manifest());
+        assertThatThrownBy(() -> harness.chat("a", "hello")).hasMessageContaining("result save failed");
+        assertThat(calls.get()).isEqualTo(1);
+        assertThat(counter.executions.get()).isEqualTo(1);
+        var failed = store.load("a").getFirst();
+        assertThat(failed.status()).isEqualTo(ConversationTurn.Status.FAILED);
+        assertThat(failed.messages()).extracting(TranscriptMessage::role).containsExactly("user", "assistant");
+    }
+
+    @Test
     @Timeout(10)
     void sameConversationIsSerializedWhileAnotherConversationCanProgress() throws Exception {
         var firstInside = new CountDownLatch(1);

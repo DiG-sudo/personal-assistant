@@ -17,6 +17,8 @@ import org.springframework.util.ClassUtils;
 
 import com.guodi.assistant.component.tool.VersionedToolCallback;
 import com.guodi.assistant.core.AgentRuntime;
+import com.guodi.assistant.core.AgentExecution;
+import com.guodi.assistant.core.RuntimeHooks;
 import com.guodi.assistant.core.AssistantHarness;
 import com.guodi.assistant.port.*;
 import com.guodi.assistant.versioning.ComponentRevision;
@@ -70,9 +72,12 @@ public final class ReleaseManifestFactory {
                         "provider", model.provider().name(), "timeoutSeconds", model.timeoutSeconds()),
                 "context", Map.copyOf(json.convertValue(properties.context(), parameterType)),
                 "limits", Map.copyOf(json.convertValue(properties.limits(), parameterType)),
-                "runtimeSha256", Fingerprints.sha256(Fingerprints.classBytes(AgentRuntime.class)),
-                "harnessSha256", Fingerprints.sha256(Fingerprints.classBytes(AssistantHarness.class)),
-                "assemblySha256", Fingerprints.sha256(Fingerprints.classBytes(AssistantAutoConfiguration.class)));
+                "runtimeSha256", Fingerprints.implementationSha256(AgentRuntime.class),
+                "harnessSha256", Fingerprints.implementationSha256(AssistantHarness.class),
+                "assemblySha256", Fingerprints.implementationSha256(AssistantAutoConfiguration.class),
+                "executionSha256", Fingerprints.implementationSha256(AgentExecution.class),
+                "hooksSha256", Fingerprints.implementationSha256(RuntimeHooks.class),
+                "contextContractSha256", Fingerprints.implementationSha256(ContextBuilder.class));
         var draft = new ExecutionManifest(properties.releaseId(), "", prompt, components, selectedTools, settings);
         try {
             byte[] encoded = json.copy().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS).writeValueAsBytes(draft);
@@ -106,12 +111,12 @@ public final class ReleaseManifestFactory {
         String factoryHash = "";
         if (definition instanceof RootBeanDefinition root && root.getResolvedFactoryMethod() != null) {
             var method = root.getResolvedFactoryMethod();
-            factoryHash = Fingerprints.sha256(Fingerprints.classBytes(method.getDeclaringClass()));
+            factoryHash = Fingerprints.implementationSha256(method.getDeclaringClass());
             if (implementation.isSynthetic()) {
                 implementation = method.getDeclaringClass();
             }
         }
-        String codeHash = Fingerprints.sha256((Fingerprints.sha256(Fingerprints.classBytes(implementation))
+        String codeHash = Fingerprints.sha256((Fingerprints.implementationSha256(implementation)
                 + factoryHash).getBytes(StandardCharsets.UTF_8));
         return new ComponentSnapshot(new Ref(revision.id(), revision.version()), implementation.getName(), codeHash,
                 component instanceof ConfigurationSnapshot source ? source.versionedSettings() : Map.of());

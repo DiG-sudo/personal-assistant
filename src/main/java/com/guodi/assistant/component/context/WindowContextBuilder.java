@@ -2,6 +2,7 @@ package com.guodi.assistant.component.context;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -28,14 +29,23 @@ public final class WindowContextBuilder implements ContextBuilder {
 
     @Override
     public List<Message> build(List<ConversationTurn> history, List<String> memories, String userMessage) {
+        return prepare(history, memories, List.of(TranscriptMessage.from(new UserMessage(userMessage)))).messages();
+    }
+
+    @Override
+    public ModelContext prepare(List<ConversationTurn> history, List<String> memories,
+            List<TranscriptMessage> activeTurn) {
         var messages = new ArrayList<Message>();
         messages.add(new SystemMessage(systemPrompt));
         var notes = new StringBuilder();
-        for (String memory : memories) {
+        var memoryIndexes = new ArrayList<Integer>();
+        for (int index = 0; index < memories.size(); index++) {
+            String memory = memories.get(index);
             if (notes.length() + memory.length() + 3 > memoryChars) {
                 continue;
             }
             notes.append("- ").append(memory).append('\n');
+            memoryIndexes.add(index);
         }
         if (!notes.isEmpty()) {
             // Treat recalled content as data. Only the fixed system prompt defines tool permissions.
@@ -60,7 +70,8 @@ public final class WindowContextBuilder implements ContextBuilder {
         for (var turn : selected) {
             turn.messages().stream().map(TranscriptMessage::toMessage).forEach(messages::add);
         }
-        messages.add(new UserMessage(userMessage));
-        return List.copyOf(messages);
+        activeTurn.stream().map(TranscriptMessage::toMessage).forEach(messages::add);
+        return new ModelContext(messages, Optional.of(new Selection(
+                selected.stream().map(ConversationTurn::id).toList(), memoryIndexes)));
     }
 }

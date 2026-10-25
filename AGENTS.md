@@ -3,7 +3,9 @@
 ## Boundaries
 
 - core/AgentRuntime owns only the model/tool loop and its execution budget.
-- core/AssistantHarness owns conversation serialization, persistence and lifecycle.
+- core/AssistantHarness owns conversation serialization, persistence and lifecycle through explicit aroundRun/reasoning/model/tool boundaries.
+- Pass RuntimeHooks per run; AgentExecution holds one committed turn cursor and actual request count. Never add a second mutable transcript.
+- Build transient context before each reasoning step. Keep diagnostic logging separate from authoritative checkpoints.
 - port/ owns stable component contracts. Use Spring AI ChatModel and ToolCallback directly.
 - component/ owns default implementations; extension/ may provide user components.
 - config/AssistantAutoConfiguration is the composition root. Defaults yield to user beans.

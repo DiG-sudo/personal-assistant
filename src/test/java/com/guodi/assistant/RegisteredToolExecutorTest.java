@@ -57,6 +57,20 @@ class RegisteredToolExecutorTest {
     }
 
     @Test
+    void newExecutorPropagatesCancellationWhileTheReleasedVersionKeepsItsBehavior() {
+        var callback = ToolCallbacks.from(new Object() {
+            @Tool(name = "cancel", description = "cancel")
+            public String cancel() { throw new java.util.concurrent.CancellationException("stopped"); }
+        })[0];
+        var calls = List.of(new ToolCall("c", "function", "cancel", "{}"));
+        var context = new ToolContext(Map.of());
+        assertThat(new RegisteredToolExecutor(List.of(callback), 1000).execute(calls, context)
+                .getFirst().responseData()).contains("工具执行失败");
+        var next = new com.guodi.assistant.component.tool.CancellableToolExecutor(List.of(callback), 1000);
+        assertThatThrownBy(() -> next.execute(calls, context)).isInstanceOf(java.util.concurrent.CancellationException.class);
+    }
+
+    @Test
     void videoExampleProducesEncodedSearchEntriesOnly() {
         var result = new VideoSearchLinksTool().search("Java & 并发");
         assertThat(result.get("youtube")).contains("Java+%26+%E5%B9%B6%E5%8F%91");

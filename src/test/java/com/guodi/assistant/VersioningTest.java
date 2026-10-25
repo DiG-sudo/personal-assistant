@@ -57,6 +57,9 @@ class VersioningTest {
         runner().run(context -> {
             assertThat(context).hasNotFailed();
             original[0] = context.getBean(ExecutionManifest.class);
+            assertThat(original[0].releaseId()).isEqualTo("assistant-harness-1.1.0");
+            assertThat(original[0].components().get("toolExecutor").revision().version()).isEqualTo("1.1.0");
+            assertThat(original[0].settings()).containsKeys("executionSha256", "hooksSha256", "contextContractSha256");
             assertThatThrownBy(() -> ((java.util.Map<?, ?>) original[0].settings().get("context")).clear())
                     .isInstanceOf(UnsupportedOperationException.class);
             var properties = context.getBean(AssistantProperties.class);
@@ -74,6 +77,7 @@ class VersioningTest {
             assertThat(context).hasNotFailed();
             var current = context.getBean(ExecutionManifest.class);
             assertThat(current.releaseId()).isEqualTo("assistant-compact-1.0.0");
+            assertThat(current.components().get("toolExecutor").revision().version()).isEqualTo("1.0.0");
             assertThat(current.fingerprint()).isNotEqualTo(original[0].fingerprint());
             var harness = context.getBean(AssistantHarness.class);
             harness.chat("release-test", "hello again");

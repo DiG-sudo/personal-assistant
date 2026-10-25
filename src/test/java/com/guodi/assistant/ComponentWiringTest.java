@@ -43,7 +43,8 @@ class ComponentWiringTest {
     void userBeansReplaceEveryDefaultPortWithoutChangingCoreClasses() {
         runner().withUserConfiguration(CustomComponents.class).withPropertyValues(
                 "assistant.components.context.id=custom-context", "assistant.components.store.id=custom-store",
-                "assistant.components.memory.id=none", "assistant.components.tool-executor.id=custom-tools").run(context -> {
+                "assistant.components.memory.id=none", "assistant.components.tool-executor.id=custom-tools",
+                "assistant.components.tool-executor.version=1.0.0").run(context -> {
             assertThat(context).hasNotFailed().hasSingleBean(ChatModel.class).hasSingleBean(MemoryModule.class)
                     .hasSingleBean(ConversationStore.class).hasSingleBean(ContextBuilder.class).hasSingleBean(ToolExecutor.class);
             var reply = context.getBean(AssistantHarness.class).chat("custom", "hello");

@@ -1,0 +1,25 @@
+# Frozen release: create a new file when changing this bundle.
+assistant:
+  release-id: assistant-harness-1.1.0
+  prompt:
+    id: assistant
+    version: 1.0.0
+    resource: ${ASSISTANT_SYSTEM_PROMPT:classpath:prompts/assistant/v1.txt}
+    sha256: ${ASSISTANT_PROMPT_SHA256:ed7118d2c70269c9be92d59db7da1c22d8df52e85921877227f0b7da080916aa}
+  components:
+    context: {id: window, version: 1.0.0}
+    memory: {id: '${ASSISTANT_MEMORY:notes}', version: 1.0.0}
+    store: {id: json-files, version: 1.0.0}
+    tool-executor: {id: serial, version: 1.1.0}
+  tools:
+    - {id: current_time, version: 1.0.0}
+    - {id: video_search_links, version: 1.0.0}
+  context:
+    recent-turns: 8
+    history-chars: 24000
+    memory-chars: 4000
+  limits:
+    max-model-calls: 12
+    max-context-chars: 64000
+    max-tools-per-round: 8
+    tool-result-chars: 6000

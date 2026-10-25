@@ -17,9 +17,9 @@ mvn spring-boot:run
 
 ## 版本管理
 
-默认清单：[baseline-v1.yml](src/main/resources/releases/baseline-v1.yml)。
+默认清单：[harness-v2.yml](src/main/resources/releases/harness-v2.yml)，发布组合为 `assistant-harness-1.1.0`。旧的 baseline-v1.yml 与 compact-v1.yml 保留。
 
-它固定提示词版本及校验和、上下文/记忆/存储/执行器版本、工具名称与版本，以及上下文和调用预算。另有 [compact-v1.yml](src/main/resources/releases/compact-v1.yml)，使用相同组件实现并减少历史上下文，用于比较配置。
+它固定提示词版本及校验和、上下文/记忆/存储/执行器版本、工具名称与版本，以及上下文和调用预算。旧的 baseline-v1.yml 与 [compact-v1.yml](src/main/resources/releases/compact-v1.yml) 使用相同组件版本、不同历史窗口，可互相比较配置。
 
 切换版本组合：
 
@@ -58,8 +58,9 @@ flowchart TD
 
 | 位置 | 职责 |
 | --- | --- |
-| `core/AgentRuntime` | 模型与工具循环、执行预算、工具意图检查点 |
-| `core/AssistantHarness` | 会话串行、恢复、持久化、失败收口与记忆调用 |
+| `core/AgentRuntime` | 模型与工具循环、实际请求预算、工具意图检查点顺序 |
+| `core/AssistantHarness` | aroundRun / aroundReasoning / aroundModelCall / aroundToolRound、恢复与持久化 |
+| `core/AgentExecution` | 每轮的已提交游标、历史/记忆快照和实际请求计数 |
 | `port/` | 组件稳定契约 |
 | `component/` | 默认组件实现 |
 | `extension/`（按需创建） | 自定义组件与工具 Bean |
@@ -69,6 +70,10 @@ flowchart TD
 | `resources/prompts/assistant/v1.txt` | assistant@1.0.0 提示词 |
 
 核心循环不解释业务工具名或组件版本。用户 Bean 替换对应默认组件，启动时核对实现版本与清单一致。工具支持同时注册多个实现版本，再按清单选择其中一个。
+
+每次模型推理前重新调用上下文组件，临时模型视图不修改已保存记录。RuntimeHooks 在 run 时传入，Harness 与 Runtime 没有构造器循环依赖。
+
+排查问题先按 turnId 查阶段日志：memory.recall → context → model → persistence → tools → memory.observe；版本查本轮 manifest。职责表和错误处理见 [架构](docs/ARCHITECTURE.md)。日志不保存完整模型输入，也不替代恢复检查点。
 
 开发示例见 [组件开发指南](docs/COMPONENTS.md)。
 
@@ -93,7 +98,7 @@ mvn spring-boot:run
 
 | 环境变量 | 默认值 |
 | --- | --- |
-| `ASSISTANT_RELEASE` | `classpath:releases/baseline-v1.yml` |
+| `ASSISTANT_RELEASE` | `classpath:releases/harness-v2.yml` |
 | `ASSISTANT_PORT` | `18081` |
 | `ASSISTANT_DATA_DIR` | `./data`，相对于启动目录 |
 | `ASSISTANT_MODEL_PROVIDER` | `demo` |

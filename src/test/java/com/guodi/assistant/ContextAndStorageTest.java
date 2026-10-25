@@ -36,8 +36,12 @@ class ContextAndStorageTest {
                 TranscriptMessage.from(new AssistantMessage("recent answer")))).complete();
         var failed = ConversationTurn.start("failed", TestSupport.manifest()).fail("no");
         var history = List.of(old, withTools, failed);
-        var context = new WindowContextBuilder("system", 1, 2000, 20)
-                .build(history, List.of("x".repeat(40), "note"), "new");
+        var prepared = new WindowContextBuilder("system", 1, 2000, 20)
+                .prepare(history, List.of("x".repeat(40), "note"),
+                        List.of(TranscriptMessage.from(new UserMessage("new"))));
+        assertThat(prepared.selection().orElseThrow().turnIds()).containsExactly(withTools.id());
+        assertThat(prepared.selection().orElseThrow().memoryIndexes()).containsExactly(1);
+        var context = prepared.messages();
         assertThat(context.stream().map(message -> message.getText())).doesNotContain("old", "failed");
         assertThat(context.stream().filter(message -> message instanceof ToolResponseMessage).count()).isEqualTo(1);
         assertThat(context.getLast().getText()).isEqualTo("new");

@@ -84,10 +84,14 @@ observe 只接收已提交的成功轮次，不修改原始聊天。更换实现
 | --- | --- | --- |
 | ChatModel | 类或 Bean 方法的 ComponentRevision | 一次 call 做一次模型调用，保留工具 ID，尊重手动执行设置 |
 | ConversationStore | components.store | 按时间加载，按 turn ID 原子保存，保留 manifest |
-| ContextBuilder | components.context | 选择完整成功轮次；最后为当前用户消息；不改历史 |
+| ContextBuilder | components.context | 每步 prepare 选择模型视图、保留本轮完整工具配对；不改历史 |
 | ToolExecutor | components.tool-executor | 暴露与执行共用允许列表；结果顺序与 ID 匹配清单工具 |
 
 模型继续使用 Spring AI ChatModel，不增加另一套模型调用协议。第三方最终类或 Lambda 可以在 Bean 工厂方法上声明版本。
+
+上下文的旧 build(history, memories, userMessage) 仍可使用。默认 prepare 每次推理调用它，并追加本轮已经提交的 assistant/tool 消息。只实现 build 时，日志明确标记 selection=unreported。
+
+若要根据本轮工具结果调整策略，覆盖 prepare(history, memories, activeTurn)，返回 ContextBuilder.ModelContext；其 messages 仅供本次模型请求使用。可通过 Optional.of(new Selection(turnIds, memoryIndexes)) 报告真实选择，记忆索引对应传入的 memories；未报告时用 Optional.empty()。这些证据不另存一份聊天或记忆。
 
 自定义上下文组件可注入 ExecutionManifest.PromptSnapshot，使用其 text 作为已校验系统提示；不要自行再次读取可变文件。
 
@@ -100,3 +104,13 @@ observe 只接收已提交的成功轮次，不修改原始聊天。更换实现
 默认装配只提供当前已实现版本；修改清单版本号不会自动生成新算法。
 
 更新与回退步骤见 [版本更新指南](VERSIONING.md)。Runtime 与 Harness 不负责组件目录、版本解析或热加载。
+
+## 调整执行策略的位置
+
+- 一轮恢复、提交和记忆时机：AssistantHarness.aroundRun。
+- 每步上下文构造：aroundReasoning 调用 ContextBuilder.prepare。
+- 真实模型请求的包装：aroundModelCall；真实调用函数接受 Prompt，Runtime 在调用前检查最终请求和计数。当前没有自动重试。
+- 工具组的执行包装：aroundToolRound；允许列表、顺序和普通业务错误属于 ToolExecutor。
+- 权威检查点：Harness.checkpoint / commit。工具意图成功保存后才执行，禁止包装层自动重放不确定的外部副作用。
+
+不要在策略组件中重新保存对话或维护另一份消息列表。新增资源由相应执行边界负责 finally 清理。

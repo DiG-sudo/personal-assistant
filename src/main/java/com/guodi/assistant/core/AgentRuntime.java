@@ -1,15 +1,14 @@
 package com.guodi.assistant.core;
 
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Consumer;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
@@ -34,45 +33,55 @@ public final class AgentRuntime {
         this.maxToolsPerRound = maxToolsPerRound;
     }
 
-    /** Returns the call count only after the final answer checkpoint succeeds. */
-    public int run(List<Message> initialContext, String conversationId,
-            Consumer<List<TranscriptMessage>> checkpoint) {
-        List<Message> messages = new ArrayList<>(initialContext);
-        int turnStart = messages.size() - 1;
+    /** Only committed messages feed the next step. A failed checkpoint stops execution immediately. */
+    public void run(AgentExecution execution, RuntimeHooks hooks) {
         var options = ToolCallingChatOptions.builder()
                 .toolCallbacks(tools.callbacks()).internalToolExecutionEnabled(false).build();
-        var toolContext = new ToolContext(Map.of("conversationId", conversationId));
+        var toolContext = new ToolContext(Map.of("conversationId", execution.conversationId(),
+                "turnId", execution.turn().id().toString()));
 
-        for (int callNumber = 1; callNumber <= maxModelCalls; callNumber++) {
-            if (characters(messages) > maxContextChars) {
-                throw new AgentException("本轮上下文超过字符预算，请缩小请求或调整上下文组件。");
-            }
-            var response = model.call(new Prompt(messages, options));
-            if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
-                throw new AgentException("模型没有返回有效响应。");
-            }
+        for (int step = 1; step <= maxModelCalls; step++) {
+            var response = hooks.aroundReasoning(execution, messages -> {
+                var request = new Prompt(messages, options);
+                return hooks.aroundModelCall(execution, request, actualRequest -> {
+                    if (characters(actualRequest.getInstructions()) > maxContextChars) {
+                        throw new AgentException("本轮上下文超过字符预算，请缩小请求或调整上下文组件。");
+                    }
+                    execution.modelCallStarted(maxModelCalls);
+                    return model.call(actualRequest);
+                });
+            });
+            // Validate the returned value once, including a result replaced by a wrapper.
+            validateResponse(response);
             AssistantMessage assistant = response.getResult().getOutput();
-            if (!assistant.hasToolCalls() && (assistant.getText() == null || assistant.getText().isBlank())) {
-                throw new AgentException("模型返回了空回答。");
-            }
-            if (assistant.hasToolCalls()) {
-                validateCalls(assistant);
-            }
-            messages.add(assistant);
             // Persist intent before calling tools, including tools with external side effects.
-            checkpoint.accept(transcript(messages, turnStart));
+            hooks.checkpoint(execution, TranscriptMessage.from(assistant));
             if (!assistant.hasToolCalls()) {
-                return callNumber;
+                return;
             }
             // The last available model call must leave room to summarize tool results.
-            if (callNumber == maxModelCalls) {
+            if (execution.modelCalls() == maxModelCalls) {
                 throw new AgentException("模型调用预算已耗尽，本轮尚未执行的工具不会运行。");
             }
-            var results = tools.execute(assistant.getToolCalls(), toolContext);
-            messages.add(ToolResponseMessage.builder().responses(results).build());
-            checkpoint.accept(transcript(messages, turnStart));
+            var calls = assistant.getToolCalls();
+            var results = hooks.aroundToolRound(execution, calls, () -> tools.execute(calls, toolContext));
+            hooks.checkpoint(execution, TranscriptMessage.from(
+                    ToolResponseMessage.builder().responses(results).build()));
         }
         throw new AgentException("模型调用预算已耗尽。");
+    }
+
+    private void validateResponse(ChatResponse response) {
+        if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
+            throw new AgentException("模型没有返回有效响应。");
+        }
+        var assistant = response.getResult().getOutput();
+        if (!assistant.hasToolCalls() && (assistant.getText() == null || assistant.getText().isBlank())) {
+            throw new AgentException("模型返回了空回答。");
+        }
+        if (assistant.hasToolCalls()) {
+            validateCalls(assistant);
+        }
     }
 
     private void validateCalls(AssistantMessage assistant) {
@@ -86,10 +95,6 @@ public final class AgentRuntime {
                 throw new AgentException("模型返回了无效或重复的工具调用标识。");
             }
         }
-    }
-
-    private static List<TranscriptMessage> transcript(List<Message> messages, int start) {
-        return messages.subList(start, messages.size()).stream().map(TranscriptMessage::from).toList();
     }
 
     private static long characters(List<Message> messages) {
