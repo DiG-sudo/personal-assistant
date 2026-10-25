@@ -1,0 +1,43 @@
+# Personal Assistant working guide
+
+## Boundaries
+
+- core/AgentRuntime owns only the model/tool loop and its execution budget.
+- core/AssistantHarness owns conversation serialization, persistence and lifecycle.
+- port/ owns stable component contracts. Use Spring AI ChatModel and ToolCallback directly.
+- component/ owns default implementations; extension/ may provide user components.
+- config/AssistantAutoConfiguration is the composition root. Defaults yield to user beans.
+- Add business tools through VersionedToolCallback beans selected by a release manifest. Do not add business tool names or vendor classes to core.
+- Components are selected at startup. Dynamic plugin loading is not implemented.
+
+## State
+
+- ConversationStore is authoritative for chat transcripts.
+- MemoryModule owns long-term memory; do not store a second transcript there.
+- ContextBuilder selects a model view and never rewrites stored history.
+- Preserve assistant/tool call pairing and IDs.
+- Persist tool intent before external execution.
+- Never automatically replay interrupted side effects.
+- Serialize each conversation across restore, model calls, commit and memory update.
+- One process owns one local data directory.
+
+## Implementation
+
+Read README.md, docs/ARCHITECTURE.md and docs/COMPONENTS.md first.
+Use the smallest implementation that meets a current requirement.
+Keep real trust-boundary, permission, persistence and concurrency checks.
+Avoid defensive checks for states already ruled out by the supported call chain.
+Every non-trivial invariant needs one runnable test.
+Update docs/ARCHITECTURE.md and docs/ISSUES.md when behavior changes.
+Do not modify the sibling pr-review-agent project as part of assistant work.
+
+## Versioning
+
+- Read docs/VERSIONING.md before changing prompts, component behavior or tool contracts.
+- Preserve released prompt resources, release manifests and component implementations. Add a new version instead of overwriting them.
+- Declare component identity on the implementation or Bean factory with ComponentRevision.
+- Tool selection must match the exact version in the release; never fall back to latest.
+- Freeze the execution manifest when creating a turn and preserve it across checkpoints and terminal states.
+- Keep old schema records readable without fabricating current version metadata.
+- Custom ConfigurationSnapshot settings must be immutable JSON values without credentials.
+- Prefer compilation and the smallest focused checks. Do not run or grow complex suites, browser scenarios, concurrency tests, external-network or paid-model checks unless the user asks.

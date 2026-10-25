@@ -1,0 +1,17 @@
+spring:
+  config:
+    import: ${ASSISTANT_RELEASE:classpath:releases/baseline-v1.yml}
+
+server:
+  address: 127.0.0.1
+  port: ${ASSISTANT_PORT:18081}
+
+assistant:
+  data-directory: ${ASSISTANT_DATA_DIR:./data}
+  model:
+    provider: ${ASSISTANT_MODEL_PROVIDER:demo}
+    api-key: ${AI_API_KEY:}
+    base-url: ${AI_BASE_URL:https://api.openai.com}
+    completions-path: ${AI_COMPLETIONS_PATH:/v1/chat/completions}
+    name: ${AI_MODEL:}
+    timeout-seconds: 60

@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>个人助手</title>
+<style>
+:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#25352e;background:#f5f6f2}
+*{box-sizing:border-box}body{margin:0}main{max-width:880px;margin:auto;padding:32px 24px;min-height:100dvh;display:flex;flex-direction:column}
+header{display:flex;justify-content:space-between;align-items:center;gap:20px}h1{font-size:24px;margin:0 0 8px;font-weight:650}
+small,.hint{color:#68786c;font-size:13px}button,textarea{font:inherit}button{border:1px solid #d1d9cd;border-radius:10px;padding:10px 16px;background:#fff;color:#274a36;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}#messages{flex:1;padding:32px 0;display:flex;flex-direction:column;gap:18px;min-height:320px}
+.empty{margin:auto;text-align:center;color:#68786c;line-height:1.9}.bubble{padding:14px 18px;border-radius:15px;background:white;border:1px solid #e0e5dc;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.75;max-width:92%}
+.user{align-self:flex-end;background:#e2eedf;border-color:#d1e2cd}.assistant{align-self:flex-start}.warning{font-size:13px;color:#8a541a;background:#fff8e9;border-color:#ead6b1}
+label{display:block;font-size:13px;color:#68786c;margin-bottom:8px}.composer{display:flex;gap:12px;align-items:flex-end;padding:12px;background:#fff;border:1px solid #d5ded1;border-radius:16px}
+textarea{resize:vertical;width:100%;min-height:70px;max-height:240px;border:0;outline:none;background:transparent;padding:8px;line-height:1.6}.composer button{background:#2f583f;color:white;border-color:#2f583f;flex-shrink:0}
+.hint{margin:10px 0;line-height:1.8}#status{min-height:20px;color:#8a541a;font-size:13px}#session{font-family:monospace;font-size:11px}
+@media(max-width:600px){main{padding:24px 16px}.bubble{max-width:100%}header{align-items:flex-start}h1{font-size:21px}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<div><h1>个人助手</h1><small id="mode">正在连接…</small></div>
+<button id="new" type="button">新对话</button>
+</header>
+<div id="messages" role="log" aria-live="polite"></div>
+<form id="form">
+<label for="input">发送消息</label>
+<div class="composer">
+<textarea id="input" maxlength="16000" placeholder="例如：现在几点？ / 记住：我喜欢中文回答" required></textarea>
+<button id="send" type="submit">发送</button>
+</div>
+</form>
+<p class="hint">Enter 发送 · Shift + Enter 换行。长期备注以“记住：”开头，保存在当前对话中。</p>
+<div id="status" role="status"></div>
+<small>当前会话 <span id="session"></span></small>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const key = 'personal-assistant.conversation';
+let conversationId = localStorage.getItem(key) || crypto.randomUUID();
+let busy = false;
+localStorage.setItem(key, conversationId);
+$('session').textContent = conversationId;
+
+async function api(url, options) {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || data.message || '请求失败，请稍后重试。');
+  return data;
+}
+function bubble(role, text) {
+  const item = document.createElement('div');
+  item.className = 'bubble ' + role;
+  item.textContent = text;
+  $('messages').append(item);
+}
+function empty() {
+  if ($('messages').childElementCount) return;
+  const item = document.createElement('div');
+  item.className = 'empty';
+  item.textContent = '从一段对话开始。\n试试询问时间，或寻找 Java 学习视频。';
+  $('messages').append(item);
+}
+async function refresh() {
+  const turns = await api('/api/conversations/' + encodeURIComponent(conversationId));
+  $('messages').replaceChildren();
+  for (const turn of turns) {
+    for (const message of turn.messages) {
+      if (message.role === 'user') bubble('user', message.text);
+      if (message.role === 'assistant' && !message.toolCalls.length && message.text) bubble('assistant', message.text);
+    }
+    if (turn.status === 'FAILED') bubble('warning', turn.failure);
+    if (turn.status === 'RUNNING') bubble('warning', '这轮尚未完成。服务中断后不会自动重放工具调用。');
+  }
+  empty();
+  $('messages').lastElementChild?.scrollIntoView({block:'nearest'});
+}
+function setBusy(value) {
+  busy = value;
+  $('send').disabled = value;
+  $('new').disabled = value;
+  $('input').disabled = value;
+}
+$('form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const message = $('input').value.trim();
+  if (busy || !message) return;
+  if ($('messages').querySelector('.empty')) $('messages').replaceChildren();
+  bubble('user', message);
+  $('input').value = '';
+  setBusy(true);
+  $('status').textContent = '正在处理…';
+  try {
+    const reply = await api('/api/chat', {method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({conversationId, message})});
+    await refresh();
+    $('status').textContent = reply.warnings.join(' ');
+  } catch (error) {
+    $('status').textContent = error.message;
+    try { await refresh(); } catch {}
+  } finally {
+    setBusy(false);
+    $('input').focus();
+  }
+});
+$('input').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    if (!busy) $('form').requestSubmit();
+  }
+});
+$('new').addEventListener('click', () => {
+  conversationId = crypto.randomUUID();
+  localStorage.setItem(key, conversationId);
+  $('session').textContent = conversationId;
+  $('messages').replaceChildren();
+  $('status').textContent = '';
+  empty();
+});
+async function start() {
+  try {
+    const components = await api('/api/components');
+    $('mode').textContent = components.mode === 'demo'
+      ? '本地演示模式 · 配置真实模型后可自由聊天' : '真实模型模式';
+    await refresh();
+  } catch (error) { $('status').textContent = error.message; }
+}
+start();
+</script>
+</body>
+</html>
