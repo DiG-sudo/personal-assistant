@@ -27,13 +27,13 @@ class ContextAndStorageTest {
     @Test
     void contextSelectsWholeCompletedTurnsWithoutMutatingHistory() {
         var old = TestSupport.completed("old", "old answer");
-        var withTools = ConversationTurn.start("recent", TestSupport.manifest()).complete(List.of(
+        var withTools = ConversationTurn.start("recent", TestSupport.manifest()).checkpoint(List.of(
                 TranscriptMessage.from(new UserMessage("recent")),
                 TranscriptMessage.from(AssistantMessage.builder().content("").toolCalls(List.of(
                         new AssistantMessage.ToolCall("c1", "function", "lookup", "{}"))).build()),
                 TranscriptMessage.from(ToolResponseMessage.builder().responses(List.of(
                         new ToolResponseMessage.ToolResponse("c1", "lookup", "found"))).build()),
-                TranscriptMessage.from(new AssistantMessage("recent answer"))));
+                TranscriptMessage.from(new AssistantMessage("recent answer")))).complete();
         var failed = ConversationTurn.start("failed", TestSupport.manifest()).fail("no");
         var history = List.of(old, withTools, failed);
         var context = new WindowContextBuilder("system", 1, 2000, 20)
@@ -57,9 +57,9 @@ class ContextAndStorageTest {
                 TranscriptMessage.from(ToolResponseMessage.builder().responses(List.of(
                         new ToolResponseMessage.ToolResponse("c1", "time", "2026"))).build()),
                 TranscriptMessage.from(new AssistantMessage("你好")));
-        store.save("chat", turn.complete(messages));
+        store.save("chat", turn.checkpoint(messages).complete());
         var restored = new FileConversationStore(directory.resolve("conversations"), files).load("chat");
-        assertThat(restored).containsExactly(turn.complete(messages));
+        assertThat(restored).containsExactly(turn.checkpoint(messages).complete());
         assertThat(restored.getFirst().messages().get(2).toMessage()).isInstanceOf(ToolResponseMessage.class);
         assertThat(store.load("different")).isEmpty();
     }

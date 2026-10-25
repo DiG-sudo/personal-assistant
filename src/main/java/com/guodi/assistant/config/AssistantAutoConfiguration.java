@@ -110,9 +110,8 @@ public class AssistantAutoConfiguration {
 
     @Bean
     ExecutionManifest executionManifest(AssistantProperties properties, PromptSnapshot prompt,
-            ChatModel model, ConversationStore conversations, MemoryModule memory,
-            ContextBuilder context, ToolExecutor tools, ConfigurableListableBeanFactory beans, ObjectMapper json) {
-        return ReleaseManifestFactory.create(properties, prompt, model, conversations, memory, context, tools, beans, json);
+            ConfigurableListableBeanFactory beans, ObjectMapper json) {
+        return ReleaseManifestFactory.create(properties, prompt, beans, json);
     }
 
     @Bean

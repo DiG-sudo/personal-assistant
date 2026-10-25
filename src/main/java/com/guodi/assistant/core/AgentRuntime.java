@@ -34,7 +34,8 @@ public final class AgentRuntime {
         this.maxToolsPerRound = maxToolsPerRound;
     }
 
-    public Result run(List<Message> initialContext, String conversationId,
+    /** Returns the call count only after the final answer checkpoint succeeds. */
+    public int run(List<Message> initialContext, String conversationId,
             Consumer<List<TranscriptMessage>> checkpoint) {
         List<Message> messages = new ArrayList<>(initialContext);
         int turnStart = messages.size() - 1;
@@ -61,7 +62,7 @@ public final class AgentRuntime {
             // Persist intent before calling tools, including tools with external side effects.
             checkpoint.accept(transcript(messages, turnStart));
             if (!assistant.hasToolCalls()) {
-                return new Result(transcript(messages, turnStart), callNumber);
+                return callNumber;
             }
             // The last available model call must leave room to summarize tool results.
             if (callNumber == maxModelCalls) {
@@ -96,14 +97,5 @@ public final class AgentRuntime {
             case SYSTEM -> message.getText().length();
             default -> TranscriptMessage.from(message).characters();
         }).sum();
-    }
-
-    public record Result(List<TranscriptMessage> messages, int modelCalls) {
-        public Result {
-            messages = List.copyOf(messages);
-        }
-        public String answer() {
-            return messages.getLast().text();
-        }
     }
 }

@@ -64,15 +64,15 @@ public final class AssistantHarness {
         // The single mutable cursor always points to the latest persisted transcript.
         var current = new ConversationTurn[] { ConversationTurn.start(message, manifest) };
         conversations.save(conversationId, current[0]);
-        AgentRuntime.Result result;
+        int modelCalls;
         try {
             var modelContext = context.build(history, recalled, message);
-            result = runtime.run(modelContext, conversationId, transcript -> {
+            modelCalls = runtime.run(modelContext, conversationId, transcript -> {
                 var checkpoint = current[0].checkpoint(transcript);
                 conversations.save(conversationId, checkpoint);
                 current[0] = checkpoint;
             });
-            var completed = current[0].complete(result.messages());
+            var completed = current[0].complete();
             conversations.save(conversationId, completed);
             current[0] = completed;
         } catch (RuntimeException error) {
@@ -93,7 +93,8 @@ public final class AssistantHarness {
             log.warn("Memory observe failed for turn {}", current[0].id(), error);
             warnings.add("回答已保存，但本轮长期记忆更新失败。");
         }
-        return new Reply(conversationId, current[0].id(), result.answer(), result.modelCalls(), List.copyOf(warnings), manifest.releaseId(), manifest.fingerprint());
+        return new Reply(conversationId, current[0].id(), current[0].messages().getLast().text(), modelCalls,
+                List.copyOf(warnings), manifest.releaseId(), manifest.fingerprint());
     }
 
     public record Reply(String conversationId, UUID turnId, String answer, int modelCalls, List<String> warnings, String releaseId, String configurationId) {}

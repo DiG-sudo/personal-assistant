@@ -31,9 +31,9 @@ final class TestSupport {
     }
 
     static ConversationTurn completed(String question, String answer) {
-        return ConversationTurn.start(question, TestSupport.manifest()).complete(List.of(
+        return ConversationTurn.start(question, TestSupport.manifest()).checkpoint(List.of(
                 TranscriptMessage.from(new UserMessage(question)),
-                TranscriptMessage.from(new AssistantMessage(answer))));
+                TranscriptMessage.from(new AssistantMessage(answer)))).complete();
     }
 
     static final class Store implements ConversationStore {

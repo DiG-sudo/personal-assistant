@@ -32,10 +32,11 @@ class AgentRuntimeTest {
             assertThat(((ToolCallingChatOptions) prompt.getOptions()).getInternalToolExecutionEnabled()).isFalse();
             return TestSupport.text("你好");
         };
-        var result = runtime(model, 3).run(context(), "chat", ignored -> {});
-        assertThat(result.answer()).isEqualTo("你好");
-        assertThat(result.modelCalls()).isEqualTo(1);
-        assertThat(result.messages()).extracting(TranscriptMessage::role).containsExactly("user", "assistant");
+        var checkpoints = new ArrayList<List<TranscriptMessage>>();
+        int modelCalls = runtime(model, 3).run(context(), "chat", checkpoints::add);
+        assertThat(modelCalls).isEqualTo(1);
+        assertThat(checkpoints.getLast().getLast().text()).isEqualTo("你好");
+        assertThat(checkpoints.getLast()).extracting(TranscriptMessage::role).containsExactly("user", "assistant");
     }
 
     @Test
@@ -49,15 +50,16 @@ class AgentRuntimeTest {
             assertThat(prompt.getInstructions().getLast()).isInstanceOf(ToolResponseMessage.class);
             return TestSupport.text("完成");
         };
-        var result = runtime(model, 3).run(context(), "chat", transcript -> {
+        int modelCalls = runtime(model, 3).run(context(), "chat", transcript -> {
             checkpoints.add(transcript);
             if (transcript.size() == 2) {
                 assertThat(counter.executions.get()).isZero();
             }
         });
-        assertThat(result.messages()).extracting(TranscriptMessage::role)
+        assertThat(modelCalls).isEqualTo(2);
+        assertThat(checkpoints.getLast()).extracting(TranscriptMessage::role)
                 .containsExactly("user", "assistant", "tool", "assistant");
-        assertThat(result.messages().get(2).toolResponses().getFirst().id()).isEqualTo("call-1");
+        assertThat(checkpoints.getLast().get(2).toolResponses().getFirst().id()).isEqualTo("call-1");
         assertThat(counter.executions.get()).isEqualTo(1);
         assertThat(checkpoints.getFirst().getLast().toolCalls()).hasSize(1);
     }

@@ -10,14 +10,11 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.chat.messages.AssistantMessage.ToolCall;
 import org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse;
-import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
-import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
-import org.springframework.core.io.ClassPathResource;
 
 import com.guodi.assistant.component.memory.NoMemory;
 import com.guodi.assistant.config.AssistantAutoConfiguration;
@@ -51,6 +48,9 @@ class ComponentWiringTest {
                     .hasSingleBean(ConversationStore.class).hasSingleBean(ContextBuilder.class).hasSingleBean(ToolExecutor.class);
             var reply = context.getBean(AssistantHarness.class).chat("custom", "hello");
             assertThat(reply.answer()).isEqualTo("custom answer");
+            assertThat(new com.guodi.assistant.web.ChatController(context.getBean(AssistantHarness.class),
+                    context.getBean(com.guodi.assistant.versioning.ExecutionManifest.class)).components())
+                    .containsEntry("mode", "live");
             assertThat(context.getBean(ConversationStore.class).load("custom")).hasSize(1);
             assertThat(context.getBean(MemoryModule.class)).isSameAs(context.getBean("customMemory"));
         });

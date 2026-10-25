@@ -34,10 +34,17 @@ Do not modify the sibling pr-review-agent project as part of assistant work.
 ## Versioning
 
 - Read docs/VERSIONING.md before changing prompts, component behavior or tool contracts.
-- Preserve released prompt resources, release manifests and component implementations. Add a new version instead of overwriting them.
+- Preserve released prompt resources and release manifests. Behavior changes require a new component version; behavior-preserving internal refactors retain the behavior version and are identified by Git revision and implementation fingerprint.
 - Declare component identity on the implementation or Bean factory with ComponentRevision.
 - Tool selection must match the exact version in the release; never fall back to latest.
 - Freeze the execution manifest when creating a turn and preserve it across checkpoints and terminal states.
 - Keep old schema records readable without fabricating current version metadata.
 - Custom ConfigurationSnapshot settings must be immutable JSON values without credentials.
 - Prefer compilation and the smallest focused checks. Do not run or grow complex suites, browser scenarios, concurrency tests, external-network or paid-model checks unless the user asks.
+
+## Simplicity
+
+- Apply ponytail and redundancy-design-audit when changing code.
+- Trace all callers before removing a check or argument.
+- Read replies from committed turn checkpoints and component metadata from the manifest; do not create parallel writable sources.
+- Prefer existing Spring/JDK APIs over handwritten container traversal and repeated derived collections.

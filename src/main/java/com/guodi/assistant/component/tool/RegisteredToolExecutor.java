@@ -1,9 +1,10 @@
 package com.guodi.assistant.component.tool;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 import org.springframework.ai.chat.messages.AssistantMessage.ToolCall;
 import org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse;
@@ -19,21 +20,20 @@ public final class RegisteredToolExecutor implements ToolExecutor {
     private final int resultChars;
 
     public RegisteredToolExecutor(List<ToolCallback> callbacks, int resultChars) {
-        var registered = new LinkedHashMap<String, ToolCallback>();
+        var registered = new TreeMap<String, ToolCallback>();
         for (var callback : callbacks) {
             String name = callback.getToolDefinition().name();
             if (registered.putIfAbsent(name, callback) != null) {
                 throw new IllegalStateException("Duplicate tool name: " + name);
             }
         }
-        this.tools = Map.copyOf(registered);
+        this.tools = Collections.unmodifiableMap(registered);
         this.resultChars = resultChars;
     }
 
     @Override
     public List<ToolCallback> callbacks() {
-        return tools.values().stream().sorted(java.util.Comparator.comparing(
-                callback -> callback.getToolDefinition().name())).toList();
+        return List.copyOf(tools.values());
     }
 
     @Override

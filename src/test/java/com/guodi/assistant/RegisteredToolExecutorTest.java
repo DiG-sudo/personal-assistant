@@ -20,6 +20,12 @@ class RegisteredToolExecutorTest {
         var callback = ToolCallbacks.from(new SampleTool())[0];
         var executor = new RegisteredToolExecutor(List.of(callback), 1000);
         assertThat(executor.callbacks()).containsExactly(callback);
+        var alpha = ToolCallbacks.from(new Object() {
+            @Tool(name = "alpha", description = "alpha")
+            public String alpha() { return "alpha"; }
+        })[0];
+        assertThat(new RegisteredToolExecutor(List.of(callback, alpha), 1000).callbacks())
+                .extracting(tool -> tool.getToolDefinition().name()).containsExactly("alpha", "sample");
         var results = executor.execute(List.of(
                 new ToolCall("one", "function", "missing", "{}"),
                 new ToolCall("two", "function", "sample", "{}")), new ToolContext(Map.of()));

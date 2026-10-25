@@ -25,8 +25,8 @@ public record ConversationTurn(int schemaVersion, UUID id, Instant startedAt, St
         return new ConversationTurn(schemaVersion, id, startedAt, Status.RUNNING, transcript, null, manifest);
     }
 
-    public ConversationTurn complete(List<TranscriptMessage> transcript) {
-        return new ConversationTurn(schemaVersion, id, startedAt, Status.COMPLETED, transcript, null, manifest);
+    public ConversationTurn complete() {
+        return new ConversationTurn(schemaVersion, id, startedAt, Status.COMPLETED, messages, null, manifest);
     }
 
     public ConversationTurn fail(String reason) {

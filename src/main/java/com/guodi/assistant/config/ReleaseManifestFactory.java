@@ -2,10 +2,12 @@ package com.guodi.assistant.config;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.LinkedHashMap;
+import java.util.Comparator;
 import java.util.Map;
+import java.util.Objects;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import org.springframework.ai.chat.model.ChatModel;
@@ -39,37 +41,35 @@ public final class ReleaseManifestFactory {
     }
 
     public static ExecutionManifest create(AssistantProperties properties, PromptSnapshot prompt,
-            ChatModel model, ConversationStore store, MemoryModule memory, ContextBuilder context,
-            ToolExecutor tools, ConfigurableListableBeanFactory beans, ObjectMapper json) {
-        var components = new LinkedHashMap<String, ComponentSnapshot>();
-        components.put("model", describe(model, ChatModel.class, beans));
-        components.put("memory", require(properties.components().memory(), describe(memory, MemoryModule.class, beans)));
-        components.put("context", require(properties.components().context(), describe(context, ContextBuilder.class, beans)));
-        components.put("store", require(properties.components().store(), describe(store, ConversationStore.class, beans)));
-        components.put("toolExecutor", require(properties.components().toolExecutor(), describe(tools, ToolExecutor.class, beans)));
+            ConfigurableListableBeanFactory beans, ObjectMapper json) {
+        var selected = properties.components();
+        var components = Map.of(
+                "model", describe(ChatModel.class, beans),
+                "memory", require(selected.memory(), describe(MemoryModule.class, beans)),
+                "context", require(selected.context(), describe(ContextBuilder.class, beans)),
+                "store", require(selected.store(), describe(ConversationStore.class, beans)),
+                "toolExecutor", require(selected.toolExecutor(), describe(ToolExecutor.class, beans)));
 
-        var selectedTools = tools.callbacks().stream().map(callback -> {
+        var selectedTools = beans.getBean(ToolExecutor.class).callbacks().stream().map(callback -> {
             if (!(callback instanceof VersionedToolCallback versioned)) {
                 throw new IllegalStateException("Active tool has no version: " + callback.getToolDefinition().name());
             }
             return versioned.snapshot();
         }).toList();
-        if (!selectedTools.stream().map(ToolSnapshot::revision).toList().equals(properties.tools().stream().sorted(java.util.Comparator.comparing(Ref::id).thenComparing(Ref::version)).toList())) {
+        var expectedTools = properties.tools().stream()
+                .sorted(Comparator.comparing(Ref::id).thenComparing(Ref::version)).toList();
+        if (!selectedTools.stream().map(ToolSnapshot::revision).toList().equals(expectedTools)) {
             throw new IllegalStateException("Active tools do not match the release manifest");
         }
 
-        var modelSettings = new LinkedHashMap<String, Object>();
-        modelSettings.put("name", properties.model().name() == null ? "" : properties.model().name());
-        modelSettings.put("provider", properties.model().provider().name());
-        modelSettings.put("timeoutSeconds", properties.model().timeoutSeconds());
-        // Never copy the API key, environment or credential-bearing endpoint URLs into a transcript.
-        var settings = Map.<String, Object>of("model", Map.copyOf(modelSettings),
-                "context", Map.of("recentTurns", properties.context().recentTurns(),
-                        "historyChars", properties.context().historyChars(), "memoryChars", properties.context().memoryChars()),
-                "limits", Map.of("maxModelCalls", properties.limits().maxModelCalls(),
-                        "maxContextChars", properties.limits().maxContextChars(),
-                        "maxToolsPerRound", properties.limits().maxToolsPerRound(),
-                        "toolResultChars", properties.limits().toolResultChars()),
+        var model = properties.model();
+        var parameterType = new TypeReference<Map<String, Object>>() {};
+        // Model connection properties contain credentials; only copy these safe fields.
+        var settings = Map.<String, Object>of(
+                "model", Map.of("name", Objects.toString(model.name(), ""),
+                        "provider", model.provider().name(), "timeoutSeconds", model.timeoutSeconds()),
+                "context", Map.copyOf(json.convertValue(properties.context(), parameterType)),
+                "limits", Map.copyOf(json.convertValue(properties.limits(), parameterType)),
                 "runtimeSha256", Fingerprints.sha256(Fingerprints.classBytes(AgentRuntime.class)),
                 "harnessSha256", Fingerprints.sha256(Fingerprints.classBytes(AssistantHarness.class)),
                 "assemblySha256", Fingerprints.sha256(Fingerprints.classBytes(AssistantAutoConfiguration.class)));
@@ -90,9 +90,10 @@ public final class ReleaseManifestFactory {
         return actual;
     }
 
-    private static <T> ComponentSnapshot describe(T component, Class<T> port, ConfigurableListableBeanFactory beans) {
-        String name = beans.getBeansOfType(port).entrySet().stream()
-                .filter(entry -> entry.getValue() == component).map(Map.Entry::getKey).findFirst().orElseThrow();
+    private static ComponentSnapshot describe(Class<?> port, ConfigurableListableBeanFactory beans) {
+        var bean = beans.resolveNamedBean(port);
+        String name = bean.getBeanName();
+        Object component = bean.getBeanInstance();
         Class<?> implementation = ClassUtils.getUserClass(component);
         ComponentRevision revision = implementation.getAnnotation(ComponentRevision.class);
         if (revision == null) {

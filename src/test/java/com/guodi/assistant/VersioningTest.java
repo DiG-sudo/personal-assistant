@@ -20,7 +20,6 @@ import com.guodi.assistant.config.AssistantProperties;
 import com.guodi.assistant.config.ReleaseManifestFactory;
 import com.guodi.assistant.core.AssistantHarness;
 import com.guodi.assistant.domain.ConversationTurn;
-import com.guodi.assistant.port.*;
 import com.guodi.assistant.versioning.ExecutionManifest;
 import com.guodi.assistant.versioning.ExecutionManifest.Ref;
 
@@ -58,15 +57,18 @@ class VersioningTest {
         runner().run(context -> {
             assertThat(context).hasNotFailed();
             original[0] = context.getBean(ExecutionManifest.class);
+            assertThatThrownBy(() -> ((java.util.Map<?, ?>) original[0].settings().get("context")).clear())
+                    .isInstanceOf(UnsupportedOperationException.class);
             var properties = context.getBean(AssistantProperties.class);
             var again = ReleaseManifestFactory.create(properties, original[0].prompt(),
-                    context.getBean(org.springframework.ai.chat.model.ChatModel.class),
-                    context.getBean(ConversationStore.class), context.getBean(MemoryModule.class),
-                    context.getBean(ContextBuilder.class), context.getBean(ToolExecutor.class),
                     context.getSourceApplicationContext().getBeanFactory(), context.getBean(ObjectMapper.class));
             assertThat(again.fingerprint()).isEqualTo(original[0].fingerprint());
             var reply = context.getBean(AssistantHarness.class).chat("release-test", "hello");
             assertThat(reply.configurationId()).isEqualTo(original[0].fingerprint());
+            var components = new com.guodi.assistant.web.ChatController(
+                    context.getBean(AssistantHarness.class), original[0]).components();
+            assertThat(components).containsEntry("mode", "demo")
+                    .containsEntry("tools", List.of("current_time", "video_search_links"));
         });
         runner().withPropertyValues("spring.config.import=classpath:releases/compact-v1.yml").run(context -> {
             assertThat(context).hasNotFailed();

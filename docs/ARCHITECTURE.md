@@ -18,7 +18,7 @@
 6. 上下文组件构造模型视图，最后放入当前 UserMessage。
 7. Runtime 调用模型，明确禁用 Spring AI 内部自动工具执行。
 8. 模型返回工具请求时，保存 AssistantMessage 意图后执行注册工具；保存 ToolResponseMessage 后继续推理。
-9. 普通最终文本结束本轮。Harness 保存 COMPLETED 后才将回答视为成功。
+9. 普通最终文本完成最后一次检查点后，Runtime 只返回模型调用次数。Harness 从已提交检查点标记 COMPLETED 并生成回答，不重复传递消息。
 10. 调用记忆组件 observe。更新失败只产生 warning，不重新执行模型。
 11. 释放会话锁，返回回答和 warnings。
 
@@ -92,3 +92,15 @@ ToolExecutor.callbacks 与 execute 必须使用同一允许列表。默认实现
 - 聊天响应返回 releaseId/configurationId，组件查询返回当前 manifest。快照不会调用模型或工具，也不代表外部返回值可完全复现。
 
 本次版本化验证只运行 VersioningTest 的四项本地检查及一项组件替换装配检查。未运行浏览器、外部模型、并发或完整回归测试。
+
+## 精简后的职责来源
+
+- 最后成功提交的 ConversationTurn 是本轮回答的来源。Runtime 不再返回重复消息 Result，complete() 直接使用当前记录的消息。
+- ReleaseManifestFactory 从同一 BeanFactory 解析实际组件，不同时接收容器和容器中已有的五个组件。resolveNamedBean 保留 Spring 的组件选择规则。
+- ChatController 的模式和工具信息读取已核对的 manifest，不额外注入模型、工具执行器来重复组装元数据。
+- 默认工具注册表在构造时用 TreeMap 固定名称顺序，callbacks() 不再反复排序。
+- 上下文和预算参数直接从配置记录转换为 JSON Map，模型连接参数继续使用不含密钥的白名单。
+
+本次为行为等价的内部精简，提示词与发布清单保持原版本；原始实现保留在 Git 基线中，新提交和实现指纹区分源码修订。
+
+本次精简复用 9 项本地小检查，覆盖普通结束、工具配对、预算、检查点失败、元信息、工具顺序和组件替换；未运行完整测试集、浏览器、并发或外部模型检查。
