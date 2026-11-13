@@ -52,3 +52,11 @@ Do not modify the sibling pr-review-agent project as part of assistant work.
 - Trace all callers before removing a check or argument.
 - Read replies from committed turn checkpoints and component metadata from the manifest; do not create parallel writable sources.
 - Prefer existing Spring/JDK APIs over handwritten container traversal and repeated derived collections.
+
+## Context organization
+
+Read and follow [agent.md](agent.md) before designing or changing context composition, selection, injection or compaction. It defines the core organization principles; concrete context contents remain incremental decisions rather than a fixed checklist.
+
+## Module records and local references
+
+Before working on a confirmed module, read its companion-agent/<module>/agent.md first. Keep confirmed decisions, implementation status and exact affected code scope there. Follow the local-reference workflow in root agent.md; use references/MaiBot at the recorded commit before fetching the same upstream code again.

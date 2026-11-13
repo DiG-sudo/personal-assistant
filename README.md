@@ -2,6 +2,10 @@
 
 Java 21 + Spring Boot + Spring AI 的个人助手。固定 ReAct / Harness 主链路，模型、工具、记忆、上下文与存储通过组件插入；版本由发布清单固定。
 
+陪伴助手的人格、记忆、行为设计与开发记录见 [开发总览](companion-agent/README.md)，当前优先推进 [人格设计](companion-agent/personality/README.md)。
+
+上下文组织的核心准则见 [agent.md](agent.md)；具体组成逐步确定后再按准则组织。
+
 ## 启动
 
 ```bash
@@ -17,7 +21,7 @@ mvn spring-boot:run
 
 ## 版本管理
 
-默认清单：[harness-v2.yml](src/main/resources/releases/harness-v2.yml)，发布组合为 `assistant-harness-1.1.0`。旧的 baseline-v1.yml 与 compact-v1.yml 保留。
+默认清单：[session-v1.yml](src/main/resources/releases/session-v1.yml)，发布组合为 `assistant-session-1.0.0`。旧的 harness-v2.yml、baseline-v1.yml 与 compact-v1.yml 保留。
 
 它固定提示词版本及校验和、上下文/记忆/存储/执行器版本、工具名称与版本，以及上下文和调用预算。旧的 baseline-v1.yml 与 [compact-v1.yml](src/main/resources/releases/compact-v1.yml) 使用相同组件版本、不同历史窗口，可互相比较配置。
 
@@ -45,7 +49,8 @@ ASSISTANT_RELEASE=classpath:releases/compact-v1.yml mvn spring-boot:run
 
 ```mermaid
 flowchart TD
-    A[聊天入口] --> C[AgentRuntime]
+    A[聊天入口] --> S[ConversationService]
+    S --> C[AgentRuntime]
     C --> B[AssistantHarness]
     C --> D[ChatModel]
     B --> E[ToolExecutor]
@@ -58,6 +63,7 @@ flowchart TD
 
 | 位置 | 职责 |
 | --- | --- |
+| `core/ConversationService` | 每会话阻塞串行、等待输入与 steer |
 | `core/AgentRuntime` | 模型与工具循环、实际请求预算、工具意图检查点顺序 |
 | `core/AssistantHarness` | aroundRun / aroundReasoning / aroundModelCall / aroundToolRound、恢复与持久化 |
 | `core/AgentExecution` | 每轮的已提交游标、历史/记忆快照和实际请求计数 |
@@ -71,7 +77,7 @@ flowchart TD
 
 核心循环不解释业务工具名或组件版本。用户 Bean 替换对应默认组件，启动时核对实现版本与清单一致。工具支持同时注册多个实现版本，再按清单选择其中一个。
 
-每次模型推理前重新调用上下文组件，临时模型视图不修改已保存记录。调用方向为 Controller → Runtime.chat → Harness.aroundRun → Runtime.runLoop；Harness 接收循环的方法引用，不反向依赖 Runtime。
+每次模型推理前重新调用上下文组件，临时模型视图不修改已保存记录。调用方向为 Controller → ConversationService → Runtime.chat → Harness.aroundRun → Runtime.runLoop；Harness 接收循环的方法引用，不反向依赖 Runtime。每个会话使用公平锁，请求线程执行自己的消息；没有线程池或后台消费者。
 
 排查问题先按 turnId 查阶段日志：memory.recall → context → model → persistence → tools → memory.observe；版本查本轮 manifest。职责表和错误处理见 [架构](docs/ARCHITECTURE.md)。日志不保存完整模型输入，也不替代恢复检查点。
 
@@ -90,6 +96,8 @@ mvn spring-boot:run
 
 最终请求地址由 `AI_BASE_URL + AI_COMPLETIONS_PATH` 组成，按服务商实际设置，避免重复拼接 `/v1`。
 
+DeepSeek V4.1 Flash 使用 `AI_BASE_URL=https://api.deepseek.com`、`AI_COMPLETIONS_PATH=/chat/completions`、`AI_MODEL=deepseek-flash` 和 DeepSeek 的 API Key。另设 `AI_REASONING_EFFORT=none`，通过非思考模式使用现有工具循环。该选项为空时沿用服务商默认行为。
+
 模型适配器记录自己的版本，模型名称记录在运行快照中。模型默认连接与响应超时 60 秒，不自动重试。真实模型调用未在此次版本化检查中执行。
 
 ## 数据与配置
@@ -98,7 +106,7 @@ mvn spring-boot:run
 
 | 环境变量 | 默认值 |
 | --- | --- |
-| `ASSISTANT_RELEASE` | `classpath:releases/harness-v2.yml` |
+| `ASSISTANT_RELEASE` | `classpath:releases/session-v1.yml` |
 | `ASSISTANT_PORT` | `18081` |
 | `ASSISTANT_DATA_DIR` | `./data`，相对于启动目录 |
 | `ASSISTANT_MODEL_PROVIDER` | `demo` |
@@ -121,13 +129,27 @@ ASSISTANT_MEMORY=none mvn spring-boot:run
 ```bash
 curl http://127.0.0.1:18081/api/chat \
   -H 'Content-Type: application/json' \
-  -d '{"conversationId":"my-chat","message":"现在几点"}'
+  -d '{"conversationId":"my-chat","messageId":"550e8400-e29b-41d4-a716-446655440000","message":"现在几点"}'
 
 curl http://127.0.0.1:18081/api/conversations/my-chat
 curl http://127.0.0.1:18081/api/components
 ```
 
-聊天返回 `conversationId、turnId、answer、modelCalls、warnings、releaseId、configurationId`。记忆故障不会回滚已保存的回答。
+普通聊天返回 `conversationId、turnId、answer、modelCalls、warnings、releaseId、configurationId`。前端为每条输入生成 messageId，可在执行期间继续发送。
+
+CLI 可用同样的请求体读取纯文本进度。`-N` 让 curl 收到内容就显示：
+
+```bash
+curl -N http://127.0.0.1:18081/api/chat/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"conversationId":"my-chat","messageId":"550e8400-e29b-41d4-a716-446655440001","message":"现在几点"}'
+```
+
+每次实际请求模型时显示调用序号。工具进度包含名称、参数、结果摘要、成功与失败数和批次耗时。流的最后输出回答。如果开始输出后执行失败，错误写在流内；被提升为补充的请求返回空的 HTTP 202。
+
+`POST /api/steer` 接收 `{conversationId,messageId}`，仅把已登记且未执行的普通消息转为当前任务补充。成功返回 STEERED；不能提升时返回 409。被提升的原聊天请求返回 202 STEERED，不再单独执行。前端等待消息旁有“转为补充”按钮。
+
+Harness 在推理前逐条保存补充，最终文本返回前还会检查剩余补充。补充采用尽力处理语义，极晚到达可能未生效，不自动带入下一轮。记忆故障不会回滚已保存的回答。
 
 ## 恢复与边界
 
@@ -153,3 +175,5 @@ mvn -Dtest=VersioningTest test
 已有其他测试保留为按需入口，不默认执行完整测试集。
 
 项目固定使用 Spring AI 1.1.8；[手动工具执行文档](https://docs.spring.io/spring-ai/reference/1.1/api/tools.html#_user_controlled_tool_execution) 是模型工具协议参考。
+
+本地演示模型每次调用等待 3 秒。连续发送 A、B、C 可观察顺序执行；A 尚未结束时，将 C 点为“转为补充”，C 会在后续推理边界加入 A，B 仍在 A 结束后独立执行。应用补充会再次调用模型，因此 A 可能超过 3 秒。

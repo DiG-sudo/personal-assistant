@@ -24,13 +24,13 @@ import org.springframework.web.client.RestClient;
 import com.guodi.assistant.component.context.WindowContextBuilder;
 import com.guodi.assistant.component.memory.NoMemory;
 import com.guodi.assistant.component.memory.NoteMemory;
-import com.guodi.assistant.component.model.DemoChatModel;
+import com.guodi.assistant.component.model.DelayedDemoChatModel;
 import com.guodi.assistant.component.storage.FileConversationStore;
 import com.guodi.assistant.component.storage.JsonFiles;
 import com.guodi.assistant.component.tool.*;
 import com.guodi.assistant.core.AgentRuntime;
 import com.guodi.assistant.core.AssistantHarness;
-import com.guodi.assistant.core.ConversationGate;
+import com.guodi.assistant.core.ConversationService;
 import com.guodi.assistant.port.*;
 import com.guodi.assistant.versioning.ComponentRevision;
 import com.guodi.assistant.versioning.ExecutionManifest;
@@ -40,13 +40,16 @@ import com.guodi.assistant.versioning.ExecutionManifest.PromptSnapshot;
 @AutoConfiguration
 @EnableConfigurationProperties(AssistantProperties.class)
 public class AssistantAutoConfiguration {
+    
     @Bean
     @ConditionalOnMissingBean(ChatModel.class)
-    @ComponentRevision(id = "openai-compatible", version = "1.0.0")
+    @ComponentRevision(id = "openai-compatible", version = "1.1.0")
+
+    
     ChatModel chatModel(AssistantProperties properties) {
         var model = properties.model();
         if (model.provider() == AssistantProperties.Provider.DEMO) {
-            return new DemoChatModel();
+            return new DelayedDemoChatModel();
         }
         if (!StringUtils.hasText(model.apiKey()) || !StringUtils.hasText(model.name())) {
             throw new IllegalStateException("真实模型需要设置 AI_API_KEY 和 AI_MODEL。");
@@ -58,8 +61,12 @@ public class AssistantAutoConfiguration {
         var api = OpenAiApi.builder().apiKey(model.apiKey()).baseUrl(model.baseUrl())
                 .completionsPath(model.completionsPath())
                 .restClientBuilder(RestClient.builder().requestFactory(requestFactory)).build();
+        var options = OpenAiChatOptions.builder().model(model.name()).internalToolExecutionEnabled(false);
+        if (StringUtils.hasText(model.reasoningEffort())) {
+            options.reasoningEffort(model.reasoningEffort());
+        }
         return OpenAiChatModel.builder().openAiApi(api)
-                .defaultOptions(OpenAiChatOptions.builder().model(model.name()).internalToolExecutionEnabled(false).build())
+                .defaultOptions(options.build())
                 .retryTemplate(RetryTemplate.builder().maxAttempts(1).build()).build();
     }
 
@@ -120,11 +127,6 @@ public class AssistantAutoConfiguration {
     }
 
     @Bean
-    ConversationGate conversationGate() {
-        return new ConversationGate();
-    }
-
-    @Bean
     AgentRuntime agentRuntime(ChatModel model, AssistantHarness harness, AssistantProperties properties) {
         var limits = properties.limits();
         return new AgentRuntime(model, harness, limits.maxModelCalls(), limits.maxContextChars(), limits.maxToolsPerRound());
@@ -132,7 +134,11 @@ public class AssistantAutoConfiguration {
 
     @Bean
     AssistantHarness assistantHarness(ConversationStore conversations, MemoryModule memory,
-            ContextBuilder context, ToolExecutor tools, ConversationGate gate, ExecutionManifest manifest) {
-        return new AssistantHarness(conversations, memory, context, tools, gate, manifest);
+            ContextBuilder context, ToolExecutor tools, ExecutionManifest manifest) {
+        return new AssistantHarness(conversations, memory, context, tools, manifest);
+    }
+    @Bean
+    ConversationService conversationService(AgentRuntime runtime) {
+        return new ConversationService(runtime);
     }
 }

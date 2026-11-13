@@ -37,7 +37,7 @@ public record AssistantProperties(
             @NotNull @Valid Ref store, @NotNull @Valid Ref toolExecutor) {}
 
     public record Model(@DefaultValue("demo") Provider provider, String apiKey, String baseUrl,
-            String completionsPath, String name, @Min(1) int timeoutSeconds) {}
+            String completionsPath, String name, String reasoningEffort, @Min(1) int timeoutSeconds) {}
 
     public record Limits(@Min(1) int maxModelCalls, @Min(1) int maxContextChars,
             @Min(1) int maxToolsPerRound, @Min(1) int toolResultChars) {}

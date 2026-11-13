@@ -1,6 +1,6 @@
 spring:
   config:
-    import: ${ASSISTANT_RELEASE:classpath:releases/harness-v2.yml}
+    import: ${ASSISTANT_RELEASE:classpath:releases/session-v1.yml}
 
 server:
   address: 127.0.0.1
@@ -14,4 +14,5 @@ assistant:
     base-url: ${AI_BASE_URL:https://api.openai.com}
     completions-path: ${AI_COMPLETIONS_PATH:/v1/chat/completions}
     name: ${AI_MODEL:}
+    reasoning-effort: ${AI_REASONING_EFFORT:}
     timeout-seconds: 60

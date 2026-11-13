@@ -16,6 +16,10 @@ import com.guodi.assistant.domain.TranscriptMessage;
 import com.guodi.assistant.port.ConversationStore;
 
 final class TestSupport {
+    static com.guodi.assistant.core.ConversationService.SessionMessage message(String text) {
+        return new com.guodi.assistant.core.ConversationService.SessionMessage(java.util.UUID.randomUUID(), text);
+    }
+
     static com.guodi.assistant.versioning.ExecutionManifest manifest() {
         return new com.guodi.assistant.versioning.ExecutionManifest("test-fixture", "test-fixture", null,
                 Map.of(), List.of(), Map.of());

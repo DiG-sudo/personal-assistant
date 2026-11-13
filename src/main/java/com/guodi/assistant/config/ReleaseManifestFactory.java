@@ -18,6 +18,7 @@ import org.springframework.util.ClassUtils;
 import com.guodi.assistant.component.tool.VersionedToolCallback;
 import com.guodi.assistant.core.AgentRuntime;
 import com.guodi.assistant.core.AgentExecution;
+import com.guodi.assistant.core.ConversationService;
 import com.guodi.assistant.core.AssistantHarness;
 import com.guodi.assistant.port.*;
 import com.guodi.assistant.versioning.ComponentRevision;
@@ -68,10 +69,12 @@ public final class ReleaseManifestFactory {
         // Model connection properties contain credentials; only copy these safe fields.
         var settings = Map.<String, Object>of(
                 "model", Map.of("name", Objects.toString(model.name(), ""),
-                        "provider", model.provider().name(), "timeoutSeconds", model.timeoutSeconds()),
+                        "provider", model.provider().name(), "timeoutSeconds", model.timeoutSeconds(),
+                        "reasoningEffort", Objects.toString(model.reasoningEffort(), "")),
                 "context", Map.copyOf(json.convertValue(properties.context(), parameterType)),
                 "limits", Map.copyOf(json.convertValue(properties.limits(), parameterType)),
                 "runtimeSha256", Fingerprints.implementationSha256(AgentRuntime.class),
+                "conversationSha256", Fingerprints.implementationSha256(ConversationService.class),
                 "harnessSha256", Fingerprints.implementationSha256(AssistantHarness.class),
                 "assemblySha256", Fingerprints.implementationSha256(AssistantAutoConfiguration.class),
                 "executionSha256", Fingerprints.implementationSha256(AgentExecution.class),

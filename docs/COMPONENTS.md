@@ -107,9 +107,9 @@ observe 只接收已提交的成功轮次，不修改原始聊天。更换实现
 
 ## 调整执行策略的位置
 
-- 聊天执行入口：AgentRuntime.chat，通过 this::runLoop 将循环交给 Harness 生命周期。
+- 聊天执行入口：ConversationService.send 负责会话串行，再调用 Runtime.chat(conversationId, message, steers)；Runtime 将 this::runLoop 交给 Harness.aroundRun，保留原有生命周期方向。历史查询由 Controller 直接调用 Harness.history。
 - 一轮恢复、提交和记忆时机：AssistantHarness.aroundRun；executeTurn 直接调用 restoreHistory、recallMemory、observeMemory 等方法。
-- 每步上下文构造：aroundReasoning 调用 ContextBuilder.prepare，并用已选工具定义构造 Prompt。
+- 每步上下文构造：aroundReasoning 先应用并提交一条待处理 steer，保存成功后移除，再调用 ContextBuilder.prepare 并构造 Prompt。
 - 真实模型请求的包装：aroundModelCall；真实调用函数接受 Prompt，Runtime 在调用前检查最终请求和计数。当前没有自动重试。
 - 工具组执行和结果检查点：aroundToolRound；允许列表、顺序和普通业务错误属于 ToolExecutor。
 - 权威检查点：Harness.checkpoint / commit。工具意图成功保存后才执行，禁止包装层自动重放不确定的外部副作用。

@@ -4,7 +4,7 @@
 
 | 层次 | 当前例子 | 固定内容 |
 | --- | --- | --- |
-| 发布组合 | assistant-harness-1.1.0 | 一组组件、提示词、工具与参数 |
+| 发布组合 | assistant-session-1.0.0 | 一组组件、提示词、工具与参数 |
 | 提示词 | assistant@1.0.0 | 资源内容和 SHA-256 |
 | 组件 | window@1.0.0、notes@1.0.0 | 实现行为，运行时记录类指纹 |
 | 工具 | video_search_links@1.0.0 | 工具实现、描述与输入 Schema |
@@ -12,6 +12,8 @@
 | 应用源码 | Git 提交 | 实现代码、Maven 依赖和清单文件 |
 
 这些版本分别表达不同变化。只调历史长度可以创建新发布组合，继续使用同一 window 实现版本；更换上下文算法则新增实现版本。模型供应商的模型名称和本项目的适配器版本分别记录。
+
+OpenAI 兼容适配器 1.1.0 增加可选 reasoningEffort。设置时发送 reasoning_effort，留空时保持默认请求行为。新的模型快照记录该参数，既有发布清单保留。
 
 ## 更新规则
 
@@ -23,7 +25,7 @@
 6. 用新的清单启动后，旧对话仍保留旧快照；不会将旧轮次标记为当前版本。
 7. 配置和代码一起提交 Git。数据、密钥和构建输出不入库。
 
-当前默认 harness-v2.yml 引用 serial@1.1.0，工具取消异常向外传播；baseline-v1.yml 与 compact-v1.yml 保留 serial@1.0.0 的原行为。两个旧清单通过不同历史窗口比较配置。
+当前默认 session-v1.yml（assistant-session-1.0.0）引用 serial@1.1.0；harness-v2.yml、baseline-v1.yml 与 compact-v1.yml 保留。工具取消异常向外传播；baseline-v1.yml 与 compact-v1.yml 保留 serial@1.0.0 的原行为。两个旧清单通过不同历史窗口比较配置。
 
 本次 window 的历史/记忆选择算法未改变，1.0.0 增加每步适配与选择证据，属于实现修订。骨架每步构造上下文的行为由新发布组合、Git 修订和核心类指纹标识。只换回旧清单不恢复旧骨架，需要同时切回对应 Git 修订。
 
@@ -163,3 +165,22 @@ mvn -Dtest=VersioningTest test
 本次将调用方向整理为 Runtime → 具体 Harness，aroundRun 接收循环方法引用，删除仅由 Harness 实现的协调接口以及 stage/diagnostic 回调包装。HTTP 输入输出、组件算法、提示词、预算与持久化数据格式保持原有行为。
 
 这是骨架内部重构，继续使用 assistant-harness-1.1.0 发布组合；不改已发布清单、提示词或旧标签。新 Git 修订和实现指纹识别这次源码变化；回退骨架时同时切换对应 Git 修订。
+
+
+## 会话层与 steer 发布
+
+session-v1.yml 是新增发布组合 assistant-session-1.0.0，不覆盖 harness-v2.yml 或提示词资源。会话层新增普通输入 messageId、阻塞串行和 steer 接口；会话层调用 Runtime.chat(conversationId, message, steers)，Runtime 通过 Harness.aroundRun 与 this::runLoop 保留原有生命周期。Runtime 只转交执行身份，不接收 Session 或管理等待请求；历史查询仍由 Harness 提供。schemaVersion 仍为 2，组件版本与提示词内容不变。
+
+新 manifest.settings.conversationSha256 记录 ConversationService 及其成员类的实现指纹。该行为属于骨架修订，结合新发布组合与 Git 修订归因；旧轮次 manifest 保持原样。回退会话行为需要同时回退 Git 修订，单独切换旧清单不会撤销新源码。
+
+## 演示模型延迟
+
+新增 DelayedDemoChatModel（demo@1.1.0）继承原 demo@1.0.0，每次模型请求阻塞 3 秒，作为默认本地演示模型。原实现保留原行为；模型快照记录新的实际版本和包含父类的实现指纹，不修改既有发布清单或历史快照。
+
+## 独立人格类的版本
+
+Personality 第一版位于 component/personality，类上声明实现行为版本 personality@1.0.0；构造参数 revision 复用 Ref，表示具体人格内容的 id 和版本，两种版本分别管理。构造时要求显式身份和版本，不接受空值或 latest。text() 输出三段固定顺序文本，sha256() 计算这份文本的 UTF-8 内容指纹；相同文本可以具有相同指纹，身份仍以 Ref 区分。
+
+修改人设、表达约定或示例时发布新的内容版本；修改文本组织等实现行为时新增实现版本，保留旧实现。当前 livelyV1() 固定返回 lively-companion@1.0.0，原方法及内容在后续迭代时保留；固定文本的 SHA-256 由针对性测试锁定。通用构造器承载内存中的不可变定义，不是版本目录，不保证不同对象对同一 Ref 提供相同内容；后续资源发布和装配时还需核对实际内容与指定校验和。
+
+本次具体人设固定在 Personality.livelyV1() 中，尚未新增外部人格资源，未修改旧提示词或发布清单，也未注册人格 Bean。当前 manifest 不会自动记录这个独立对象；人格资源加载、精确选择及执行快照接入另行实现，不能通过改配置假定已经生效。

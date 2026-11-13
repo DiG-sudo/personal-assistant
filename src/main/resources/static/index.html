@@ -16,6 +16,7 @@ label{display:block;font-size:13px;color:#68786c;margin-bottom:8px}.composer{dis
 textarea{resize:vertical;width:100%;min-height:70px;max-height:240px;border:0;outline:none;background:transparent;padding:8px;line-height:1.6}.composer button{background:#2f583f;color:white;border-color:#2f583f;flex-shrink:0}
 .hint{margin:10px 0;line-height:1.8}#status{min-height:20px;color:#8a541a;font-size:13px}#session{font-family:monospace;font-size:11px}
 @media(max-width:600px){main{padding:24px 16px}.bubble{max-width:100%}header{align-items:flex-start}h1{font-size:21px}}
+.pending-message{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:12px 16px;margin-bottom:10px;border:1px solid #d5ded1;border-radius:12px;background:#edf3e9;white-space:pre-wrap;overflow-wrap:anywhere}.pending-message>div{min-width:0}.pending-message button{flex-shrink:0;font-size:13px;padding:7px 10px}
 </style>
 </head>
 <body>
@@ -25,6 +26,7 @@ textarea{resize:vertical;width:100%;min-height:70px;max-height:240px;border:0;ou
 <button id="new" type="button">新对话</button>
 </header>
 <div id="messages" role="log" aria-live="polite"></div>
+<div id="pending" aria-live="polite"></div>
 <form id="form">
 <label for="input">发送消息</label>
 <div class="composer">
@@ -32,7 +34,7 @@ textarea{resize:vertical;width:100%;min-height:70px;max-height:240px;border:0;ou
 <button id="send" type="submit">发送</button>
 </div>
 </form>
-<p class="hint">Enter 发送 · Shift + Enter 换行。长期备注以“记住：”开头，保存在当前对话中。</p>
+<p class="hint">Enter 发送 · Shift + Enter 换行。执行中可继续发送，等待消息可转为当前任务的补充。长期备注以“记住：”开头。</p>
 <div id="status" role="status"></div>
 <small>当前会话 <span id="session"></span></small>
 </main>
@@ -40,7 +42,7 @@ textarea{resize:vertical;width:100%;min-height:70px;max-height:240px;border:0;ou
 const $ = id => document.getElementById(id);
 const key = 'personal-assistant.conversation';
 let conversationId = localStorage.getItem(key) || crypto.randomUUID();
-let busy = false;
+const pending = new Map();
 localStorage.setItem(key, conversationId);
 $('session').textContent = conversationId;
 
@@ -64,54 +66,108 @@ function empty() {
   $('messages').append(item);
 }
 async function refresh() {
-  const turns = await api('/api/conversations/' + encodeURIComponent(conversationId));
+  const requestedConversation = conversationId;
+  const turns = await api('/api/conversations/' + encodeURIComponent(requestedConversation));
+  if (conversationId !== requestedConversation) return;
   $('messages').replaceChildren();
   for (const turn of turns) {
     for (const message of turn.messages) {
       if (message.role === 'user') bubble('user', message.text);
-      if (message.role === 'assistant' && !message.toolCalls.length && message.text) bubble('assistant', message.text);
+      if (message.role === 'assistant' && !message.toolCalls.length && message.text) {
+        bubble('assistant', message.text);
+      }
     }
     if (turn.status === 'FAILED') bubble('warning', turn.failure);
-    if (turn.status === 'RUNNING') bubble('warning', '这轮尚未完成。服务中断后不会自动重放工具调用。');
+    if (turn.status === 'RUNNING' && pending.size === 0) bubble('warning', '这轮尚未完成，显示的是已保存的消息。');
   }
   empty();
   $('messages').lastElementChild?.scrollIntoView({block:'nearest'});
 }
-function setBusy(value) {
-  busy = value;
-  $('send').disabled = value;
-  $('new').disabled = value;
-  $('input').disabled = value;
+function renderPending() {
+  $('pending').replaceChildren();
+  let index = 0;
+  for (const entry of pending.values()) {
+    const first = index++ === 0;
+    const row = document.createElement('div');
+    row.className = 'pending-message';
+    const content = document.createElement('div');
+    content.textContent = entry.message;
+    const state = document.createElement('small');
+    state.textContent = entry.steered
+      ? '已提交为当前任务的补充'
+      : first ? '正在等待处理结果…' : '已提交，等待执行…';
+    content.append(document.createElement('br'), state);
+    row.append(content);
+    if (!first && !entry.steered) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = entry.steering ? '正在提交…' : '转为补充';
+      button.disabled = !!entry.steering;
+      button.addEventListener('click', () => steer(entry));
+      row.append(button);
+    }
+    $('pending').append(row);
+  }
+  $('new').disabled = pending.size > 0;
+  $('send').textContent = pending.size ? '加入等待' : '发送';
+}
+async function steer(entry) {
+  entry.steering = true;
+  renderPending();
+  try {
+    await api('/api/steer', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        conversationId: entry.conversationId,
+        messageId: entry.messageId
+      })
+    });
+    entry.steered = true;
+    $('status').textContent = '已提交补充；极晚到达的补充可能赶不上当前任务。';
+  } catch (error) {
+    $('status').textContent = error.message;
+  } finally {
+    entry.steering = false;
+    renderPending();
+  }
 }
 $('form').addEventListener('submit', async event => {
   event.preventDefault();
   const message = $('input').value.trim();
-  if (busy || !message) return;
-  if ($('messages').querySelector('.empty')) $('messages').replaceChildren();
-  bubble('user', message);
+  if (!message) return;
+  const entry = {conversationId, messageId: crypto.randomUUID(), message};
+  pending.set(entry.messageId, entry);
   $('input').value = '';
-  setBusy(true);
-  $('status').textContent = '正在处理…';
+  renderPending();
+  $('status').textContent = '消息已提交。';
   try {
-    const reply = await api('/api/chat', {method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({conversationId, message})});
-    await refresh();
-    $('status').textContent = reply.warnings.join(' ');
+    const reply = await api('/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(entry)
+    });
+    $('status').textContent = reply.status === 'STEERED'
+      ? '消息已转为补充，不再单独执行。'
+      : reply.warnings.join(' ');
   } catch (error) {
     $('status').textContent = error.message;
-    try { await refresh(); } catch {}
   } finally {
-    setBusy(false);
+    pending.delete(entry.messageId);
+    renderPending();
+    try { await refresh(); }
+    catch (error) { $('status').textContent = error.message; }
     $('input').focus();
   }
 });
 $('input').addEventListener('keydown', event => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    if (!busy) $('form').requestSubmit();
+    $('form').requestSubmit();
   }
 });
 $('new').addEventListener('click', () => {
+  if (pending.size) return;
   conversationId = crypto.randomUUID();
   localStorage.setItem(key, conversationId);
   $('session').textContent = conversationId;
@@ -123,9 +179,11 @@ async function start() {
   try {
     const components = await api('/api/components');
     $('mode').textContent = components.mode === 'demo'
-      ? '本地演示模式 · 配置真实模型后可自由聊天' : '真实模型模式';
+      ? '本地演示模式 · 每次模型调用等待 3 秒' : '真实模型模式';
     await refresh();
-  } catch (error) { $('status').textContent = error.message; }
+  } catch (error) {
+    $('status').textContent = error.message;
+  }
 }
 start();
 </script>

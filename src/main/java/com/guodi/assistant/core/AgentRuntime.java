@@ -2,6 +2,7 @@ package com.guodi.assistant.core;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -10,6 +11,10 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 
+import com.guodi.assistant.core.AssistantHarness.Reply;
+import com.guodi.assistant.core.ConversationService.SessionMessage;
+import com.guodi.assistant.core.event.AgentEvent;
+import com.guodi.assistant.core.event.ModelStarted;
 import com.guodi.assistant.domain.TranscriptMessage;
 
 /** Fixed model/tool loop. Knows nothing about files, memory strategies, HTTP or business tools. */
@@ -29,22 +34,25 @@ public final class AgentRuntime {
         this.maxToolsPerRound = maxToolsPerRound;
     }
 
-    /** 聊天入口；Harness 创建执行状态，并在生命周期中调用这个循环。 */
-    public AssistantHarness.Reply chat(String conversationId, String message) {
-        return harness.aroundRun(conversationId, message, this::runLoop);
+    /** Runs one admitted message through the existing Harness lifecycle. */
+    public Reply chat(String conversationId, String message, List<SessionMessage> steers,
+            Consumer<AgentEvent> events) {
+        return harness.aroundRun(conversationId, message, steers, events, this::runLoop);
     }
 
     private void runLoop(AgentExecution execution) {
         Function<Prompt, ChatResponse> modelCall = request -> callModel(execution, request);
         for (int step = 1; step <= maxModelCalls; step++) {
-            ChatResponse response = harness.aroundReasoning(execution,
-                    prompt -> harness.aroundModelCall(execution, prompt, modelCall));
+            ChatResponse response = harness.aroundReasoning(execution,prompt -> harness.aroundModelCall(execution, prompt, modelCall));
             validateResponse(response);
             AssistantMessage assistant = response.getResult().getOutput();
 
             // 最终回答和工具意图都先保存；保存失败就停止，不执行外部工具。
             harness.checkpoint(execution, TranscriptMessage.from(assistant));
             if (!assistant.hasToolCalls()) {
+                if (!execution.steers().isEmpty()) {
+                    continue;
+                }
                 return;
             }
             if (execution.modelCalls() == maxModelCalls) {
@@ -60,6 +68,7 @@ public final class AgentRuntime {
             throw new AgentException("本轮上下文超过字符预算，请缩小请求或调整上下文组件。");
         }
         execution.modelCallStarted(maxModelCalls);
+        execution.emit(new ModelStarted(execution.modelCalls()));
         return model.call(request);
     }
 

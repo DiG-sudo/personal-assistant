@@ -24,7 +24,13 @@ import com.guodi.assistant.core.AgentException;
 import com.guodi.assistant.core.AgentExecution;
 import com.guodi.assistant.core.AgentRuntime;
 import com.guodi.assistant.core.AssistantHarness;
-import com.guodi.assistant.core.ConversationGate;
+import com.guodi.assistant.core.ConversationService;
+import com.guodi.assistant.core.event.AgentEvent;
+import com.guodi.assistant.core.event.ModelStarted;
+import com.guodi.assistant.core.event.RequestFailed;
+import com.guodi.assistant.core.event.TurnCompleted;
+import com.guodi.assistant.core.event.TurnStarted;
+import com.guodi.assistant.core.event.TurnSteer;
 import com.guodi.assistant.domain.ConversationTurn;
 import com.guodi.assistant.domain.TranscriptMessage;
 import com.guodi.assistant.port.ConversationStore;
@@ -94,7 +100,7 @@ class AgentRuntimeTest {
             modelCalls.incrementAndGet();
             return TestSupport.text("unused");
         }, 3, 1, 4, ignored -> {});
-        assertThatThrownBy(() -> runtime.chat("chat", "你好")).isInstanceOf(AgentException.class).hasMessageContaining("上下文");
+        assertThatThrownBy(() -> runtime.send("chat", TestSupport.message("你好"))).isInstanceOf(AgentException.class).hasMessageContaining("上下文");
         assertThat(modelCalls.get()).isZero();
     }
 
@@ -105,7 +111,7 @@ class AgentRuntimeTest {
                 AssistantMessage.builder().content("").toolCalls(List.of(call, call)).build())));
         assertThatThrownBy(() -> run(malformed, 3, ignored -> {})).isInstanceOf(AgentException.class).hasMessageContaining("重复");
         var limited = runtime(malformed, 3, 10000, 1, ignored -> {});
-        assertThatThrownBy(() -> limited.chat("chat", "你好")).isInstanceOf(AgentException.class).hasMessageContaining("数量");
+        assertThatThrownBy(() -> limited.send("chat", TestSupport.message("你好"))).isInstanceOf(AgentException.class).hasMessageContaining("数量");
         assertThat(counter.executions.get()).isZero();
     }
 
@@ -116,7 +122,7 @@ class AgentRuntimeTest {
         var boundaries = new ArrayList<String>();
         var harness = new AssistantHarness(new TestSupport.Store(), new NoMemory(),
                 (history, memories, message) -> List.of(new UserMessage(message)),
-                tools, new ConversationGate(), TestSupport.manifest()) {
+                tools, TestSupport.manifest()) {
             @Override
             public ChatResponse aroundReasoning(AgentExecution run, Function<Prompt, ChatResponse> reasoning) {
                 boundaries.add("reasoning");
@@ -133,21 +139,165 @@ class AgentRuntimeTest {
                 }
             }
         };
-        var runtime = new AgentRuntime(prompt -> {
+        var runtime = new ConversationService(new AgentRuntime(prompt -> {
             actualCalls.incrementAndGet();
             throw new IllegalStateException("provider failure");
-        }, harness, 1, 10000, 4);
-        assertThatThrownBy(() -> runtime.chat("chat", "hello")).isInstanceOf(AgentException.class).hasMessageContaining("预算");
+        }, harness, 1, 10000, 4));
+        assertThatThrownBy(() -> runtime.send("chat", TestSupport.message("hello"))).isInstanceOf(AgentException.class).hasMessageContaining("预算");
         assertThat(actualCalls.get()).isEqualTo(1);
         assertThat(execution.get().modelCalls()).isEqualTo(1);
         assertThat(boundaries).containsExactly("reasoning", "model");
     }
 
-    private int run(ChatModel model, int maxCalls, Consumer<List<TranscriptMessage>> checkpoint) {
-        return runtime(model, maxCalls, 10000, 4, checkpoint).chat("chat", "你好").modelCalls();
+
+    @Test
+    void finalAnswerRechecksSteersAndAppliesOneBeforeEachFollowingReasoningStep() {
+        var stored = new TestSupport.Store();
+        var calls = new AtomicInteger();
+        var first = TestSupport.message("first supplement");
+        var second = TestSupport.message("second supplement");
+        ChatModel model = prompt -> {
+            int call = calls.incrementAndGet();
+            if (call == 2) assertThat(prompt.getInstructions().getLast().getText()).isEqualTo(first.text());
+            if (call == 3) assertThat(prompt.getInstructions().getLast().getText()).isEqualTo(second.text());
+            return TestSupport.text("answer-" + call);
+        };
+        var harness = new AssistantHarness(stored, new NoMemory(),
+                (history, memories, message) -> List.of(new UserMessage(message)),
+                tools, TestSupport.manifest()) {
+            @Override
+            public ChatResponse aroundModelCall(AgentExecution run, Prompt request, Function<Prompt, ChatResponse> call) {
+                ChatResponse response = super.aroundModelCall(run, request, call);
+                if (run.modelCalls() == 1) {
+                    run.steers().add(first);
+                    run.steers().add(second);
+                }
+                return response;
+            }
+        };
+        var conversations = new ConversationService(new AgentRuntime(model, harness, 4, 10000, 4));
+
+        var events = new ArrayList<AgentEvent>();
+        var reply = conversations.send("steer-final", TestSupport.message("original"), events::add);
+
+        assertThat(reply.answer()).isEqualTo("answer-3");
+        assertThat(reply.modelCalls()).isEqualTo(3);
+        var turn = stored.load("steer-final").getFirst();
+        assertThat(events).containsExactly(new TurnStarted(turn.id()), new ModelStarted(1),
+                new TurnSteer(turn.id(), first.messageId()), new ModelStarted(2),
+                new TurnSteer(turn.id(), second.messageId()), new ModelStarted(3), new TurnCompleted(reply));
+        assertThat(turn.status()).isEqualTo(ConversationTurn.Status.COMPLETED);
+        assertThat(turn.messages()).extracting(TranscriptMessage::text)
+                .containsExactly("original", "answer-1", first.text(), "answer-2", second.text(), "answer-3");
+        assertThat(turn.manifest()).isEqualTo(TestSupport.manifest());
     }
 
-    private AgentRuntime runtime(ChatModel model, int maxCalls, int maxChars, int maxTools,
+    @Test
+    void appliesSteerAfterTheCompleteToolExchange() {
+        var stored = new TestSupport.Store();
+        var calls = new AtomicInteger();
+        var supplement = TestSupport.message("supplement after tools");
+        ChatModel model = prompt -> {
+            if (calls.incrementAndGet() == 1) return TestSupport.tool("steer-tool", "count");
+            assertThat(prompt.getInstructions().getLast().getText()).isEqualTo(supplement.text());
+            assertThat(prompt.getInstructions().get(prompt.getInstructions().size() - 2))
+                    .isInstanceOf(ToolResponseMessage.class);
+            return TestSupport.text("done");
+        };
+        var harness = new AssistantHarness(stored, new NoMemory(),
+                (history, memories, message) -> List.of(new UserMessage(message)),
+                tools, TestSupport.manifest()) {
+            @Override
+            public ChatResponse aroundModelCall(AgentExecution run, Prompt request, Function<Prompt, ChatResponse> call) {
+                ChatResponse response = super.aroundModelCall(run, request, call);
+                if (run.modelCalls() == 1) run.steers().add(supplement);
+                return response;
+            }
+        };
+        var conversations = new ConversationService(new AgentRuntime(model, harness, 3, 10000, 4));
+
+        conversations.send("steer-tools", TestSupport.message("original"));
+
+        var messages = stored.load("steer-tools").getFirst().messages();
+        assertThat(messages).extracting(TranscriptMessage::role)
+                .containsExactly("user", "assistant", "tool", "user", "assistant");
+        assertThat(messages.get(2).toolResponses().getFirst().id()).isEqualTo("steer-tool");
+        assertThat(counter.executions.get()).isEqualTo(1);
+    }
+
+    @Test
+    void steerDoesNotResetTheModelCallBudget() {
+        var stored = new TestSupport.Store();
+        var calls = new AtomicInteger();
+        var harness = new AssistantHarness(stored, new NoMemory(),
+                (history, memories, message) -> List.of(new UserMessage(message)),
+                tools, TestSupport.manifest()) {
+            @Override
+            public ChatResponse aroundModelCall(AgentExecution run, Prompt request, Function<Prompt, ChatResponse> call) {
+                ChatResponse response = super.aroundModelCall(run, request, call);
+                run.steers().add(TestSupport.message("late supplement"));
+                return response;
+            }
+        };
+        ChatModel model = prompt -> {
+            calls.incrementAndGet();
+            return TestSupport.text("answer");
+        };
+        var conversations = new ConversationService(new AgentRuntime(model, harness, 1, 10000, 4));
+
+        var events = new ArrayList<AgentEvent>();
+        assertThatThrownBy(() -> conversations.send("steer-budget", TestSupport.message("original"), events::add))
+                .isInstanceOf(AgentException.class).hasMessageContaining("预算");
+        assertThat(calls.get()).isEqualTo(1);
+        var turn = stored.load("steer-budget").getFirst();
+        assertThat(turn.status()).isEqualTo(ConversationTurn.Status.FAILED);
+        assertThat(events).containsExactly(new TurnStarted(turn.id()), new ModelStarted(1), new RequestFailed(turn.failure()));
+    }
+
+    @Test
+    void failedSteerCheckpointStopsBeforeAnotherModelCallAndKeepsTheInputUnacknowledged() {
+        var stored = new TestSupport.Store();
+        var calls = new AtomicInteger();
+        var execution = new AtomicReference<AgentExecution>();
+        var supplement = TestSupport.message("unsaved supplement");
+        ConversationStore failing = new ConversationStore() {
+            public List<ConversationTurn> load(String id) { return stored.load(id); }
+            public void save(String id, ConversationTurn turn) {
+                if (turn.messages().getLast().text().equals(supplement.text())) {
+                    throw new IllegalStateException("steer save failed");
+                }
+                stored.save(id, turn);
+            }
+        };
+        var harness = new AssistantHarness(failing, new NoMemory(),
+                (history, memories, message) -> List.of(new UserMessage(message)),
+                tools, TestSupport.manifest()) {
+            @Override
+            public ChatResponse aroundModelCall(AgentExecution run, Prompt request, Function<Prompt, ChatResponse> call) {
+                execution.set(run);
+                ChatResponse response = super.aroundModelCall(run, request, call);
+                run.steers().add(supplement);
+                return response;
+            }
+        };
+        ChatModel model = prompt -> {
+            calls.incrementAndGet();
+            return TestSupport.text("answer");
+        };
+        var conversations = new ConversationService(new AgentRuntime(model, harness, 3, 10000, 4));
+
+        assertThatThrownBy(() -> conversations.send("steer-save", TestSupport.message("original")))
+                .hasMessageContaining("steer save failed");
+        assertThat(calls.get()).isEqualTo(1);
+        assertThat(execution.get().steers()).containsExactly(supplement);
+        assertThat(stored.load("steer-save").getFirst().messages()).extracting(TranscriptMessage::text)
+                .containsExactly("original", "answer");
+    }
+    private int run(ChatModel model, int maxCalls, Consumer<List<TranscriptMessage>> checkpoint) {
+        return runtime(model, maxCalls, 10000, 4, checkpoint).send("chat", TestSupport.message("你好")).modelCalls();
+    }
+
+    private ConversationService runtime(ChatModel model, int maxCalls, int maxChars, int maxTools,
             Consumer<List<TranscriptMessage>> checkpoint) {
         var stored = new TestSupport.Store();
         ConversationStore journal = new ConversationStore() {
@@ -161,8 +311,8 @@ class AgentRuntimeTest {
         };
         var harness = new AssistantHarness(journal, new NoMemory(),
                 (history, memories, message) -> List.of(new UserMessage(message)),
-                tools, new ConversationGate(), TestSupport.manifest());
-        return new AgentRuntime(model, harness, maxCalls, maxChars, maxTools);
+                tools, TestSupport.manifest());
+        return new ConversationService(new AgentRuntime(model, harness, maxCalls, maxChars, maxTools));
     }
 
     static final class CountingTool {

@@ -7,8 +7,7 @@ import java.util.UUID;
 import com.guodi.assistant.versioning.ExecutionManifest;
 
 /** Schema 2 freezes the execution manifest; schema 1 records remain readable without fabricated versions. */
-public record ConversationTurn(int schemaVersion, UUID id, Instant startedAt, Status status,
-        List<TranscriptMessage> messages, String failure, ExecutionManifest manifest) {
+public record ConversationTurn(int schemaVersion, UUID id, Instant startedAt, Status status,List<TranscriptMessage> messages, String failure, ExecutionManifest manifest) {
 
     public enum Status { RUNNING, COMPLETED, FAILED }
 

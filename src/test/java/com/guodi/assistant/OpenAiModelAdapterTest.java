@@ -16,6 +16,7 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import com.guodi.assistant.config.AssistantAutoConfiguration;
 import com.guodi.assistant.core.AssistantHarness;
 import com.guodi.assistant.core.AgentRuntime;
+import com.guodi.assistant.core.ConversationService;
 import com.guodi.assistant.domain.ConversationTurn;
 
 import static org.assertj.core.api.Assertions.*;
@@ -46,10 +47,10 @@ class OpenAiModelAdapterTest {
         });
         server.start();
         try {
-            runner(server).run(context -> {
+            runner(server).withPropertyValues("assistant.model.reasoning-effort=none").run(context -> {
                 assertThat(context).hasNotFailed();
                 var harness = context.getBean(AssistantHarness.class);
-                var reply = context.getBean(AgentRuntime.class).chat("provider", "现在几点");
+                var reply = context.getBean(ConversationService.class).send("provider", TestSupport.message("现在几点"));
                 assertThat(reply.modelCalls()).isEqualTo(2);
                 assertThat(reply.answer()).isEqualTo("fixture final answer");
                 assertThat(harness.history("provider").getFirst().messages()).hasSize(4);
@@ -57,6 +58,8 @@ class OpenAiModelAdapterTest {
                 assertThat(requests.getFirst().get("model").asText()).isEqualTo("fixture-model");
                 assertThat(requests.getFirst().get("tools")).hasSize(1);
                 assertThat(requests.getLast().get("messages").toString()).contains("fixture-call", "tool");
+                assertThat(requests).allSatisfy(request ->
+                        assertThat(request.path("reasoning_effort").asText()).isEqualTo("none"));
             });
         } finally {
             server.stop(0);
@@ -81,7 +84,7 @@ class OpenAiModelAdapterTest {
             runner(server).run(context -> {
                 assertThat(context).hasNotFailed();
                 var harness = context.getBean(AssistantHarness.class);
-                assertThatThrownBy(() -> context.getBean(AgentRuntime.class).chat("failed-provider", "hello")).isInstanceOf(RuntimeException.class);
+                assertThatThrownBy(() -> context.getBean(ConversationService.class).send("failed-provider", TestSupport.message("hello"))).isInstanceOf(RuntimeException.class);
                 assertThat(attempts.get()).isEqualTo(1);
                 assertThat(harness.history("failed-provider").getFirst().status()).isEqualTo(ConversationTurn.Status.FAILED);
             });

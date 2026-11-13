@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -13,11 +14,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 
+import com.guodi.assistant.core.event.AgentEvent;
+import com.guodi.assistant.core.event.RequestFailed;
+import com.guodi.assistant.core.event.ToolsFinished;
+import com.guodi.assistant.core.event.ToolsStarted;
+import com.guodi.assistant.core.event.TurnCompleted;
+import com.guodi.assistant.core.event.TurnStarted;
+import com.guodi.assistant.core.event.TurnSteer;
 import com.guodi.assistant.domain.ConversationTurn;
 import com.guodi.assistant.domain.ConversationTurn.Status;
 import com.guodi.assistant.domain.TranscriptMessage;
@@ -35,36 +44,42 @@ public class AssistantHarness {
     private final MemoryModule memory;
     private final ContextBuilder context;
     private final ToolExecutor tools;
-    private final ConversationGate gate;
     private final ExecutionManifest manifest;
 
-    public AssistantHarness(ConversationStore conversations, MemoryModule memory,
-            ContextBuilder context, ToolExecutor tools, ConversationGate gate, ExecutionManifest manifest) {
+    public AssistantHarness(ConversationStore conversations, MemoryModule memory,ContextBuilder context, ToolExecutor tools, ExecutionManifest manifest) {
         this.conversations = conversations;
         this.memory = memory;
         this.context = context;
         this.tools = tools;
-        this.gate = gate;
         this.manifest = manifest;
     }
 
-    public Reply aroundRun(String conversationId, String message, Consumer<AgentExecution> loop) {
-        return gate.within(conversationId, () -> executeTurn(conversationId, message, loop));
+    public Reply aroundRun(String conversationId, String message, List<ConversationService.SessionMessage> steers,
+            Consumer<AgentEvent> events, Consumer<AgentExecution> loop) {
+        try {
+            return executeTurn(conversationId, message, steers, events, loop);
+        } catch (RuntimeException | Error error) {
+            events.accept(new RequestFailed(failureReason(error)));
+            throw error;
+        }
     }
 
     public List<ConversationTurn> history(String conversationId) {
-        return gate.within(conversationId, () -> conversations.load(conversationId));
+        return conversations.load(conversationId);
     }
 
-    private Reply executeTurn(String conversationId, String message, Consumer<AgentExecution> loop) {
-        AgentExecution execution = new AgentExecution(conversationId, ConversationTurn.start(message, manifest));
+    private Reply executeTurn(String conversationId, String message, List<ConversationService.SessionMessage> steers,
+            Consumer<AgentEvent> events, Consumer<AgentExecution> loop) {
+        AgentExecution execution = new AgentExecution(conversationId, ConversationTurn.start(message, manifest), steers, events);
         log.info("turnId={} stage=run event=start releaseId={} configurationId={}",
                 execution.turn().id(), manifest.releaseId(), manifest.fingerprint());
 
         restoreHistory(execution);
         commit(execution, execution.turn());
+
         List<String> warnings = new ArrayList<>();
         try {
+            execution.emit(new TurnStarted(execution.turn().id()));
             recallMemory(execution, warnings);
             loop.accept(execution);
             commit(execution, execution.turn().complete());
@@ -76,9 +91,11 @@ public class AssistantHarness {
         observeMemory(execution, warnings);
         ConversationTurn completed = execution.turn();
         log.info("turnId={} stage=run event=complete modelCalls={}", completed.id(), execution.modelCalls());
-        return new Reply(conversationId, completed.id(), completed.messages().getLast().text(),
+        Reply reply = new Reply(conversationId, completed.id(), completed.messages().getLast().text(),
                 execution.modelCalls(), List.copyOf(warnings), completed.manifest().releaseId(),
                 completed.manifest().fingerprint());
+        execution.emit(new TurnCompleted(reply));
+        return reply;
     }
 
     private void restoreHistory(AgentExecution execution) {
@@ -123,6 +140,13 @@ public class AssistantHarness {
     }
 
     public ChatResponse aroundReasoning(AgentExecution execution, Function<Prompt, ChatResponse> reasoning) {
+        if (!execution.steers().isEmpty()) {
+            var steer = execution.steers().getFirst();
+            checkpoint(execution, TranscriptMessage.from(new UserMessage(steer.text())));
+            execution.steers().removeFirst();
+            log.info("turnId={} stage=steer event=applied messageId={}", execution.turn().id(), steer.messageId());
+            execution.emit(new TurnSteer(execution.turn().id(), steer.messageId()));
+        }
         ContextBuilder.ModelContext view;
         try {
             view = context.prepare(execution.history(), execution.memories(), execution.turn().messages());
@@ -153,14 +177,19 @@ public class AssistantHarness {
     }
 
     public void aroundToolRound(AgentExecution execution, AssistantMessage assistant) {
+        var calls = assistant.getToolCalls();
         log.info("turnId={} stage=tools calls={}", execution.turn().id(),
-                assistant.getToolCalls().stream().map(call -> call.id() + ":" + call.name()).toList());
+                calls.stream().map(call -> call.id() + ":" + call.name()).toList());
         ToolContext toolContext = new ToolContext(Map.of("conversationId", execution.conversationId(),
                 "turnId", execution.turn().id().toString()));
         try {
-            var results = tools.execute(assistant.getToolCalls(), toolContext);
+            execution.emit(new ToolsStarted(calls));
+            long started = System.nanoTime();
+            var results = tools.execute(calls, toolContext);
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
             ToolResponseMessage response = ToolResponseMessage.builder().responses(results).build();
             checkpoint(execution, TranscriptMessage.from(response));
+            execution.emit(new ToolsFinished(results, elapsedMs));
         } catch (RuntimeException | Error error) {
             log.warn("turnId={} stage=tools event=failed", execution.turn().id(), error);
             throw error;
@@ -185,13 +214,16 @@ public class AssistantHarness {
     }
 
     private void recordFailure(AgentExecution execution, Throwable error) {
-        String reason = error instanceof AgentException ? error.getMessage() : "执行失败，详细原因见服务日志。";
         try {
-            commit(execution, execution.turn().fail(reason));
+            commit(execution, execution.turn().fail(failureReason(error)));
         } catch (RuntimeException | Error persistenceError) {
             error.addSuppressed(persistenceError);
         }
         log.warn("turnId={} stage=run event=failed", execution.turn().id(), error);
+    }
+
+    private static String failureReason(Throwable error) {
+        return error instanceof AgentException ? error.getMessage() : "执行失败，详细原因见服务日志。";
     }
 
     private void logContextSelection(AgentExecution execution, ContextBuilder.ModelContext view) {
@@ -212,6 +244,5 @@ public class AssistantHarness {
         }
     }
 
-    public record Reply(String conversationId, UUID turnId, String answer, int modelCalls, List<String> warnings,
-            String releaseId, String configurationId) {}
+    public record Reply(String conversationId, UUID turnId, String answer, int modelCalls, List<String> warnings,String releaseId, String configurationId) {}
 }
