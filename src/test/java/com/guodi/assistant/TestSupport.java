@@ -1,28 +1,35 @@
 package com.guodi.assistant;
 
-import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.tool.ToolCallback;
+
+import com.guodi.assistant.component.tool.ToolBinding;
+import com.guodi.assistant.component.tool.ToolExecutor;
+import com.guodi.assistant.component.tool.ToolRegistry;
+import com.guodi.assistant.component.tool.ToolRoundExecutor;
 
 import com.guodi.assistant.domain.ConversationTurn;
 import com.guodi.assistant.domain.TranscriptMessage;
-import com.guodi.assistant.port.ConversationStore;
+import java.nio.file.Path;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.guodi.assistant.component.memory.NoteMemory;
+import com.guodi.assistant.component.storage.FileConversationStore;
+import com.guodi.assistant.component.storage.JsonFiles;
 
 final class TestSupport {
     static com.guodi.assistant.core.ConversationService.SessionMessage message(String text) {
-        return new com.guodi.assistant.core.ConversationService.SessionMessage(java.util.UUID.randomUUID(), text);
+        return message(text, Path.of("").toAbsolutePath().normalize());
     }
 
-    static com.guodi.assistant.versioning.ExecutionManifest manifest() {
-        return new com.guodi.assistant.versioning.ExecutionManifest("test-fixture", "test-fixture", null,
-                Map.of(), List.of(), Map.of());
+    static com.guodi.assistant.core.ConversationService.SessionMessage message(String text, Path projectPath) {
+        return new com.guodi.assistant.core.ConversationService.SessionMessage(java.util.UUID.randomUUID(), text, projectPath);
     }
 
     static ChatResponse text(String text) {
@@ -35,28 +42,34 @@ final class TestSupport {
     }
 
     static ConversationTurn completed(String question, String answer) {
-        return ConversationTurn.start(question, TestSupport.manifest()).checkpoint(List.of(
+        return ConversationTurn.start(question).checkpoint(List.of(
                 TranscriptMessage.from(new UserMessage(question)),
                 TranscriptMessage.from(new AssistantMessage(answer)))).complete();
     }
 
-    static final class Store implements ConversationStore {
-        private final Map<String, List<ConversationTurn>> conversations = new ConcurrentHashMap<>();
+    static ToolRegistry toolRegistry(ToolCallback... callbacks) {
+        return new ToolRegistry(Arrays.stream(callbacks)
+                .map(callback -> new ToolBinding(ToolBinding.Kind.WRITE, callback))
+                .toList());
+    }
 
-        @Override
-        public List<ConversationTurn> load(String id) {
-            return List.copyOf(conversations.getOrDefault(id, List.of()));
-        }
+    static ToolRoundExecutor toolRounds(ToolRegistry registry) {
+        return new ToolRoundExecutor(registry, new ToolExecutor(registry, 1000),
+                org.mockito.Mockito.mock(java.util.concurrent.ExecutorService.class));
+    }
 
-        @Override
-        public void save(String id, ConversationTurn turn) {
-            conversations.compute(id, (key, previous) -> {
-                var turns = new ArrayList<>(previous == null ? List.of() : previous);
-                turns.removeIf(existing -> existing.id().equals(turn.id()));
-                turns.add(turn);
-                turns.sort(Comparator.comparing(ConversationTurn::startedAt));
-                return List.copyOf(turns);
-            });
-        }
+    static FileConversationStore store(Path root) {
+        return new FileConversationStore(root, new JsonFiles(new ObjectMapper().findAndRegisterModules()));
+    }
+
+    static com.guodi.assistant.core.ConversationService conversations(Path directory,
+            com.guodi.assistant.core.AgentRuntime runtime) {
+        var sessions = new com.guodi.assistant.component.storage.FileSessionStore(directory.resolve("sessions"),
+                new JsonFiles(new ObjectMapper().findAndRegisterModules()));
+        return new com.guodi.assistant.core.ConversationService(runtime, sessions, store(directory));
+    }
+
+    static NoteMemory disabledMemory(Path root) {
+        return new NoteMemory(root, new JsonFiles(new ObjectMapper().findAndRegisterModules()), false);
     }
 }

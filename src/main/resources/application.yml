@@ -1,18 +1,26 @@
-spring:
-  config:
-    import: ${ASSISTANT_RELEASE:classpath:releases/session-v1.yml}
-
 server:
   address: 127.0.0.1
   port: ${ASSISTANT_PORT:18081}
 
 assistant:
   data-directory: ${ASSISTANT_DATA_DIR:./data}
+  system-prompt: ${ASSISTANT_SYSTEM_PROMPT:classpath:prompts/assistant/v1.txt}
+  memory: ${ASSISTANT_MEMORY:notes}
+  shell-image: ${ASSISTANT_SHELL_IMAGE:ubuntu:24.04}
+  context:
+    recent-turns: 8
+    history-chars: 24000
+    memory-chars: 4000
+  limits:
+    max-model-calls: 12
+    max-context-chars: 64000
+    max-tools-per-round: 8
+    tool-result-chars: 6000
   model:
-    provider: ${ASSISTANT_MODEL_PROVIDER:demo}
+    provider: openai
     api-key: ${AI_API_KEY:}
-    base-url: ${AI_BASE_URL:https://api.openai.com}
-    completions-path: ${AI_COMPLETIONS_PATH:/v1/chat/completions}
-    name: ${AI_MODEL:}
-    reasoning-effort: ${AI_REASONING_EFFORT:}
-    timeout-seconds: 60
+    base-url: https://ws-34np4pi5koc2utbe.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    completions-path: /chat/completions
+    name: kimi-k3
+    reasoning-effort: ""
+    timeout-seconds: 600

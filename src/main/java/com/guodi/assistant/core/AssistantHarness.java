@@ -1,6 +1,6 @@
 package com.guodi.assistant.core;
 
-import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +20,13 @@ import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 
+import com.guodi.assistant.component.context.WindowContextBuilder;
+import com.guodi.assistant.component.context.WindowContextBuilder.ModelContext;
+import com.guodi.assistant.component.memory.NoteMemory;
+import com.guodi.assistant.component.storage.FileConversationStore;
+import com.guodi.assistant.component.tool.ToolOutcome;
+import com.guodi.assistant.component.tool.ToolRegistry;
+import com.guodi.assistant.component.tool.ToolRoundExecutor;
 import com.guodi.assistant.core.event.AgentEvent;
 import com.guodi.assistant.core.event.RequestFailed;
 import com.guodi.assistant.core.event.ToolsFinished;
@@ -30,34 +37,29 @@ import com.guodi.assistant.core.event.TurnSteer;
 import com.guodi.assistant.domain.ConversationTurn;
 import com.guodi.assistant.domain.ConversationTurn.Status;
 import com.guodi.assistant.domain.TranscriptMessage;
-import com.guodi.assistant.port.ContextBuilder;
-import com.guodi.assistant.port.ConversationStore;
-import com.guodi.assistant.port.MemoryModule;
-import com.guodi.assistant.port.ToolExecutor;
-import com.guodi.assistant.versioning.ExecutionManifest;
-import com.guodi.assistant.versioning.Fingerprints;
 
 /** 会话恢复、记忆、上下文、工具执行和持久化；具体循环由 Runtime 传入。 */
 public class AssistantHarness {
     private static final Logger log = LoggerFactory.getLogger(AssistantHarness.class);
-    private final ConversationStore conversations;
-    private final MemoryModule memory;
-    private final ContextBuilder context;
-    private final ToolExecutor tools;
-    private final ExecutionManifest manifest;
+    private final FileConversationStore conversations;
+    private final NoteMemory memory;
+    private final WindowContextBuilder context;
+    private final ToolRegistry toolRegistry;
+    private final ToolRoundExecutor toolRounds;
 
-    public AssistantHarness(ConversationStore conversations, MemoryModule memory,ContextBuilder context, ToolExecutor tools, ExecutionManifest manifest) {
+    public AssistantHarness(FileConversationStore conversations, NoteMemory memory,
+            WindowContextBuilder context, ToolRegistry toolRegistry, ToolRoundExecutor toolRounds) {
         this.conversations = conversations;
         this.memory = memory;
         this.context = context;
-        this.tools = tools;
-        this.manifest = manifest;
+        this.toolRegistry = toolRegistry;
+        this.toolRounds = toolRounds;
     }
 
-    public Reply aroundRun(String conversationId, String message, List<ConversationService.SessionMessage> steers,
+    public Reply aroundRun(String conversationId, String message, Path projectPath, List<ConversationService.SessionMessage> steers,
             Consumer<AgentEvent> events, Consumer<AgentExecution> loop) {
         try {
-            return executeTurn(conversationId, message, steers, events, loop);
+            return executeTurn(conversationId, message, projectPath, steers, events, loop);
         } catch (RuntimeException | Error error) {
             events.accept(new RequestFailed(failureReason(error)));
             throw error;
@@ -68,11 +70,10 @@ public class AssistantHarness {
         return conversations.load(conversationId);
     }
 
-    private Reply executeTurn(String conversationId, String message, List<ConversationService.SessionMessage> steers,
+    private Reply executeTurn(String conversationId, String message, Path projectPath, List<ConversationService.SessionMessage> steers,
             Consumer<AgentEvent> events, Consumer<AgentExecution> loop) {
-        AgentExecution execution = new AgentExecution(conversationId, ConversationTurn.start(message, manifest), steers, events);
-        log.info("turnId={} stage=run event=start releaseId={} configurationId={}",
-                execution.turn().id(), manifest.releaseId(), manifest.fingerprint());
+        AgentExecution execution = new AgentExecution(conversationId, ConversationTurn.start(message), projectPath, steers, events);
+        log.info("turnId={} stage=run event=start", execution.turn().id());
 
         restoreHistory(execution);
         commit(execution, execution.turn());
@@ -92,8 +93,7 @@ public class AssistantHarness {
         ConversationTurn completed = execution.turn();
         log.info("turnId={} stage=run event=complete modelCalls={}", completed.id(), execution.modelCalls());
         Reply reply = new Reply(conversationId, completed.id(), completed.messages().getLast().text(),
-                execution.modelCalls(), List.copyOf(warnings), completed.manifest().releaseId(),
-                completed.manifest().fingerprint());
+                execution.modelCalls(), List.copyOf(warnings));
         execution.emit(new TurnCompleted(reply));
         return reply;
     }
@@ -115,11 +115,8 @@ public class AssistantHarness {
 
     private void recallMemory(AgentExecution execution, List<String> warnings) {
         try {
-            String query = execution.turn().messages().getFirst().text();
-            execution.recalled(memory.recall(execution.conversationId(), query));
-            List<String> hashes = execution.memories().stream()
-                    .map(note -> Fingerprints.sha256(note.getBytes(StandardCharsets.UTF_8))).toList();
-            log.info("turnId={} stage=memory.recall recalledHashes={}", execution.turn().id(), hashes);
+            execution.recalled(memory.recall(execution.conversationId()));
+            log.info("turnId={} stage=memory.recall count={}", execution.turn().id(), execution.memories().size());
         } catch (CancellationException cancelled) {
             throw cancelled;
         } catch (RuntimeException error) {
@@ -147,7 +144,7 @@ public class AssistantHarness {
             log.info("turnId={} stage=steer event=applied messageId={}", execution.turn().id(), steer.messageId());
             execution.emit(new TurnSteer(execution.turn().id(), steer.messageId()));
         }
-        ContextBuilder.ModelContext view;
+        ModelContext view;
         try {
             view = context.prepare(execution.history(), execution.memories(), execution.turn().messages());
         } catch (RuntimeException | Error error) {
@@ -157,7 +154,7 @@ public class AssistantHarness {
         logContextSelection(execution, view);
 
         ToolCallingChatOptions options = ToolCallingChatOptions.builder()
-                .toolCallbacks(tools.callbacks()).internalToolExecutionEnabled(false).build();
+                .toolCallbacks(toolRegistry.callbacks()).internalToolExecutionEnabled(false).build();
         Prompt prompt = new Prompt(view.messages(), options);
         return reasoning.apply(prompt);
     }
@@ -181,15 +178,16 @@ public class AssistantHarness {
         log.info("turnId={} stage=tools calls={}", execution.turn().id(),
                 calls.stream().map(call -> call.id() + ":" + call.name()).toList());
         ToolContext toolContext = new ToolContext(Map.of("conversationId", execution.conversationId(),
-                "turnId", execution.turn().id().toString()));
+                "turnId", execution.turn().id().toString(), "projectPath", execution.projectPath()));
         try {
             execution.emit(new ToolsStarted(calls));
             long started = System.nanoTime();
-            var results = tools.execute(calls, toolContext);
+            var outcomes = toolRounds.executeRound(calls, toolContext);
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            var results = outcomes.stream().map(ToolOutcome::toolResponse).toList();
             ToolResponseMessage response = ToolResponseMessage.builder().responses(results).build();
             checkpoint(execution, TranscriptMessage.from(response));
-            execution.emit(new ToolsFinished(results, elapsedMs));
+            execution.emit(new ToolsFinished(outcomes, elapsedMs));
         } catch (RuntimeException | Error error) {
             log.warn("turnId={} stage=tools event=failed", execution.turn().id(), error);
             throw error;
@@ -226,13 +224,9 @@ public class AssistantHarness {
         return error instanceof AgentException ? error.getMessage() : "执行失败，详细原因见服务日志。";
     }
 
-    private void logContextSelection(AgentExecution execution, ContextBuilder.ModelContext view) {
+    private void logContextSelection(AgentExecution execution, ModelContext view) {
         try {
-            if (view.selection().isEmpty()) {
-                log.info("turnId={} stage=context selection=unreported messages={}", execution.turn().id(), view.messages().size());
-                return;
-            }
-            ContextBuilder.Selection selected = view.selection().get();
+            var selected = view.selection();
             List<UUID> droppedTurns = execution.history().stream().map(ConversationTurn::id)
                     .filter(id -> !selected.turnIds().contains(id)).toList();
             List<Integer> droppedMemories = java.util.stream.IntStream.range(0, execution.memories().size())
@@ -244,5 +238,5 @@ public class AssistantHarness {
         }
     }
 
-    public record Reply(String conversationId, UUID turnId, String answer, int modelCalls, List<String> warnings,String releaseId, String configurationId) {}
+    public record Reply(String conversationId, UUID turnId, String answer, int modelCalls, List<String> warnings) {}
 }

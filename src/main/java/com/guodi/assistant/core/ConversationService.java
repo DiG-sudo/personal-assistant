@@ -1,5 +1,10 @@
 package com.guodi.assistant.core;
 
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Optional;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -7,16 +12,84 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.guodi.assistant.component.storage.FileConversationStore;
+import com.guodi.assistant.component.storage.FileSessionStore;
+import com.guodi.assistant.domain.ConversationInfo;
 import com.guodi.assistant.core.AssistantHarness.Reply;
 import com.guodi.assistant.core.event.AgentEvent;
 
 /** Single-process session admission; the calling request executes its own turn. */
 public final class ConversationService {
+    private static final Logger log = LoggerFactory.getLogger(ConversationService.class);
+    private final FileSessionStore sessionStore;
+    private final FileConversationStore transcripts;
     private final ConcurrentHashMap<String, Session> sessions = new ConcurrentHashMap<>();
     private final AgentRuntime runtime;
 
-    public ConversationService(AgentRuntime runtime) {
+    public ConversationService(AgentRuntime runtime, FileSessionStore sessionStore, FileConversationStore transcripts) {
         this.runtime = runtime;
+        this.sessionStore = sessionStore;
+        this.transcripts = transcripts;
+    }
+
+    public List<ConversationInfo> list() {
+        var infos = new HashMap<String, ConversationInfo>();
+        sessionStore.list().forEach(info -> infos.put(info.conversationId(), info));
+        for (String id : transcripts.conversationIds()) {
+            if (!infos.containsKey(id)) {
+                info(id).ifPresent(info -> infos.put(id, info));
+            }
+        }
+        return infos.values().stream().sorted(Comparator.comparing(ConversationInfo::updatedAt).reversed()
+                .thenComparing(ConversationInfo::conversationId)).toList();
+    }
+
+    public Optional<ConversationInfo> info(String conversationId) {
+        return sessionStore.load(conversationId).or(() -> {
+            var history = transcripts.load(conversationId);
+            if (history.isEmpty()) {
+                return Optional.empty();
+            }
+            var first = history.getFirst();
+            String title = first.messages().stream().filter(message -> "user".equals(message.role()))
+                    .map(message -> message.text()).findFirst().orElse("未命名会话");
+            // Legacy turns did not persist a project path. Reading must not guess or bind one.
+            return Optional.of(new ConversationInfo(conversationId, null, title(title),
+                    first.startedAt(), history.getLast().startedAt()));
+        });
+    }
+
+    private ConversationInfo bindProject(String conversationId, SessionMessage message) {
+        Instant now = Instant.now();
+        ConversationInfo previous = info(conversationId).orElseGet(() -> new ConversationInfo(
+                conversationId, null, title(message.text()), now, now));
+        String projectPath = message.projectPath().toString();
+        if (previous.projectPath() != null && !previous.projectPath().equals(projectPath)) {
+            throw new ProjectPathMismatchException(previous.projectPath());
+        }
+        ConversationInfo bound = new ConversationInfo(conversationId, projectPath, previous.title(),
+                previous.createdAt(), now);
+        // Commit the binding before any model or tool side effect.
+        sessionStore.save(bound);
+        return bound;
+    }
+
+    private void touch(ConversationInfo info) {
+        try {
+            sessionStore.save(new ConversationInfo(info.conversationId(), info.projectPath(), info.title(),
+                    info.createdAt(), Instant.now()));
+        } catch (RuntimeException error) {
+            // A list timestamp failure must not hide a committed answer or the original execution error.
+            log.warn("Could not update activity time for conversation {}", info.conversationId(), error);
+        }
+    }
+
+    private static String title(String message) {
+        String title = message.replaceAll("[\\p{Cc}\\s]+", " ").strip();
+        return title.length() <= 80 ? title : title.substring(0, 80) + "…";
     }
 
     /** Returns null when this waiting message has been promoted to a running turn's steer input. */
@@ -34,19 +107,17 @@ public final class ConversationService {
     }
 
     private Session session(String conversationId) {
-        return sessions.computeIfAbsent(conversationId, id -> new Session(id, runtime));
+        return sessions.computeIfAbsent(conversationId, id -> new Session(id));
     }
 
-    private static final class Session {
+    private final class Session {
         private final String conversationId;
-        private final AgentRuntime runtime;
         private final ConcurrentHashMap<UUID, SessionMessage> waiting = new ConcurrentHashMap<>();
         private final ReentrantLock executionLock = new ReentrantLock(true);
-        private volatile List<SessionMessage> activeSteers;
+        private volatile ActiveTurn activeTurn;
 
-        Session(String conversationId, AgentRuntime runtime) {
+        Session(String conversationId) {
             this.conversationId = conversationId;
-            this.runtime = runtime;
         }
 
         Reply submit(SessionMessage message, Consumer<AgentEvent> events) {
@@ -57,29 +128,43 @@ public final class ConversationService {
                 if (claimed == null) {
                     return null;
                 }
+                ConversationInfo info = bindProject(conversationId, claimed);
                 // Each turn owns its buffer. A late write cannot become another turn's input.
-                activeSteers = new CopyOnWriteArrayList<>();
-                return runtime.chat(conversationId, claimed.text(), activeSteers, events);
+                ActiveTurn active = new ActiveTurn(claimed.projectPath(), new CopyOnWriteArrayList<>());
+                activeTurn = active;
+                try {
+                    return runtime.chat(conversationId, claimed.text(), claimed.projectPath(), active.steers(), events);
+                } finally {
+                    touch(info);
+                }
             } finally {
-                activeSteers = null;
+                activeTurn = null;
                 executionLock.unlock();
             }
         }
 
         boolean steer(UUID messageId) {
-            List<SessionMessage> steers = activeSteers;
-            if (steers == null) {
+            ActiveTurn active = activeTurn;
+            if (active == null) {
                 return false;
             }
-            SessionMessage pending = waiting.remove(messageId);
-            if (pending == null) {
+            SessionMessage pending = waiting.get(messageId);
+            if (pending == null || !active.projectPath().equals(pending.projectPath())
+                    || !waiting.remove(messageId, pending)) {
                 return false;
             }
-            steers.add(pending);
+            active.steers().add(pending);
             return true;
         }
 
+        private record ActiveTurn(Path projectPath, List<SessionMessage> steers) {}
     }
 
-    public record SessionMessage(UUID messageId, String text) {}
+    public static final class ProjectPathMismatchException extends RuntimeException {
+        public ProjectPathMismatchException(String projectPath) {
+            super("会话已绑定项目目录：" + projectPath + "；请在该目录继续此会话，或创建新会话。");
+        }
+    }
+
+    public record SessionMessage(UUID messageId, String text, Path projectPath) {}
 }

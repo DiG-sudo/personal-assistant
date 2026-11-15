@@ -1,75 +1,207 @@
 package com.guodi.assistant;
 
+import java.nio.file.Files;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.chat.messages.AssistantMessage.ToolCall;
-import org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse;
-import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.model.ToolContext;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.support.ToolCallbacks;
+import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 
-import com.guodi.assistant.component.memory.NoMemory;
+import com.guodi.assistant.component.context.WindowContextBuilder;
+import com.guodi.assistant.component.memory.NoteMemory;
+import com.guodi.assistant.component.storage.FileConversationStore;
+import com.guodi.assistant.component.tool.ToolBinding;
+import com.guodi.assistant.component.tool.ToolBinding.Kind;
+import com.guodi.assistant.component.tool.ToolExecutor;
+import com.guodi.assistant.component.tool.ToolRegistry;
 import com.guodi.assistant.config.AssistantAutoConfiguration;
 import com.guodi.assistant.core.AssistantHarness;
-import com.guodi.assistant.core.AgentRuntime;
 import com.guodi.assistant.core.ConversationService;
-import com.guodi.assistant.port.*;
+import com.guodi.assistant.config.AssistantProperties;
 
 import static org.assertj.core.api.Assertions.*;
 
 class ComponentWiringTest {
     @TempDir java.nio.file.Path directory;
 
+    @BeforeEach
+    void createWorkspace() throws Exception {
+        Files.createDirectory(directory.resolve("workspace"));
+    }
+
     @Test
-    void defaultComponentsRunADemoToolRoundAndCanDisableMemoryAndTools() {
-        runner().withPropertyValues("assistant.components.memory.id=none", "assistant.tools[0].id=current_time", "assistant.tools[0].version=1.0.0").run(context -> {
-            assertThat(context).hasNotFailed().hasSingleBean(MemoryModule.class);
-            assertThat(context.getBean(MemoryModule.class)).isInstanceOf(NoMemory.class);
-            var tools = context.getBean(ToolExecutor.class);
-            assertThat(tools.callbacks()).extracting(tool -> tool.getToolDefinition().name()).containsExactly("current_time");
-            var answer = context.getBean(ConversationService.class).send("demo", TestSupport.message("现在几点"));
-            assertThat(answer.modelCalls()).isEqualTo(2);
-            assertThat(answer.answer()).contains("current_time");
+    void registeredToolsAreAvailableWithMemoryDisabled() {
+        runner().withUserConfiguration(ExtraTool.class).withPropertyValues("assistant.memory=none").run(context -> {
+            assertThat(context).hasNotFailed().hasSingleBean(NoteMemory.class);
+            assertThat(context.getBean(NoteMemory.class).recall("demo")).isEmpty();
+            assertThat(context.getBean(ToolRegistry.class).callbacks())
+                    .extracting(tool -> tool.getToolDefinition().name())
+                    .containsExactly("edit_file", "execute", "glob_files", "grep_files", "list_files",
+                            "read_file", "sample", "write_file");
         });
     }
 
     @Test
-    void userBeansReplaceEveryDefaultPortWithoutChangingCoreClasses() {
-        runner().withUserConfiguration(CustomComponents.class).withPropertyValues(
-                "assistant.components.context.id=custom-context", "assistant.components.store.id=custom-store",
-                "assistant.components.memory.id=none", "assistant.components.tool-executor.id=custom-tools",
-                "assistant.components.tool-executor.version=1.0.0").run(context -> {
-            assertThat(context).hasNotFailed().hasSingleBean(ChatModel.class).hasSingleBean(MemoryModule.class)
-                    .hasSingleBean(ConversationStore.class).hasSingleBean(ContextBuilder.class).hasSingleBean(ToolExecutor.class);
+    void userBeansReplaceDefaultComponents() {
+        runner().withUserConfiguration(CustomComponents.class).run(context -> {
+            assertThat(context).hasNotFailed().hasSingleBean(ChatModel.class).hasSingleBean(NoteMemory.class)
+                    .hasSingleBean(FileConversationStore.class).hasSingleBean(WindowContextBuilder.class).hasSingleBean(ToolRegistry.class);
             var reply = context.getBean(ConversationService.class).send("custom", TestSupport.message("hello"));
             assertThat(reply.answer()).isEqualTo("custom answer");
             assertThat(new com.guodi.assistant.web.ChatController(context.getBean(ConversationService.class),
                     context.getBean(AssistantHarness.class),
-                    context.getBean(com.guodi.assistant.versioning.ExecutionManifest.class)).components())
+                    context.getBean(ChatModel.class), context.getBean(ToolRegistry.class)).components())
                     .containsEntry("mode", "live");
-            assertThat(context.getBean(ConversationStore.class).load("custom")).hasSize(1);
-            assertThat(context.getBean(MemoryModule.class)).isSameAs(context.getBean("customMemory"));
+            assertThat(context.getBean(FileConversationStore.class).load("custom")).hasSize(1);
+            assertThat(context.getBean(NoteMemory.class)).isSameAs(context.getBean("customMemory"));
         });
     }
 
     @Test
     void addingAToolBeanRegistersItWithoutEditingRuntimeOrHarness() {
-        runner().withUserConfiguration(ExtraTool.class).withPropertyValues(
-                "assistant.tools[0].id=current_time", "assistant.tools[0].version=1.0.0",
-                "assistant.tools[1].id=video_search_links", "assistant.tools[1].version=1.0.0",
-                "assistant.tools[2].id=sample", "assistant.tools[2].version=1.0.0").run(context -> {
+        runner().withUserConfiguration(ExtraTool.class).run(context -> {
             assertThat(context).hasNotFailed();
-            assertThat(context.getBean(ToolExecutor.class).callbacks()).extracting(tool -> tool.getToolDefinition().name())
-                    .contains("sample", "current_time", "video_search_links");
+            assertThat(context.getBean(ToolRegistry.class).callbacks()).extracting(tool -> tool.getToolDefinition().name())
+                    .contains("sample").hasSize(8);
         });
+    }
+
+    @Test
+    void codingToolsUseTheSameRegistryAndExecutor() throws Exception {
+        var workspace = Files.createDirectory(directory.resolve("project"));
+        runner().withPropertyValues(
+                "assistant.data-directory=" + directory.resolve("data"),
+
+                "assistant.shell-image=local-test-image")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBeansOfType(ToolBinding.class).values())
+                            .extracting(binding -> binding.callback().getToolDefinition().name())
+                            .containsExactlyInAnyOrder("edit_file", "execute", "glob_files", "grep_files",
+                                    "list_files", "read_file", "write_file");
+                    assertThat(context.getBeansOfType(ToolBinding.class).values()).allSatisfy(binding -> {
+                        String name = binding.callback().getToolDefinition().name();
+                        assertThat(binding.kind()).isEqualTo(switch (name) {
+                            case "edit_file", "write_file" -> Kind.WRITE;
+                            case "execute" -> Kind.SHELL;
+                            default -> Kind.READ;
+                        });
+                    });
+                    assertThat(context.getBean(ToolRegistry.class).callbacks())
+                            .extracting(tool -> tool.getToolDefinition().name())
+                            .containsExactly("edit_file", "execute", "glob_files", "grep_files", "list_files",
+                                    "read_file", "write_file");
+                    var executor = context.getBean(ToolExecutor.class);
+                    var toolContext = new ToolContext(Map.of("projectPath", workspace));
+                    var write = new ToolCall("w", "function", "write_file",
+                            """
+                            {"path":"src/Main.java","content":"hello hello"}
+                            """);
+                    assertThat(executor.execute(write, toolContext).success()).isTrue();
+                    assertThat(executor.execute(write, toolContext).success()).isFalse();
+                    var edit = new ToolCall("e", "function", "edit_file",
+                            """
+                            {"path":"src/Main.java","old_string":"hello","new_string":"world","replace_all":true}
+                            """);
+                    assertThat(executor.execute(edit, toolContext).success()).isTrue();
+                    assertThat(workspace.resolve("src/Main.java")).hasContent("world world");
+                });
+    }
+
+    @Test
+    void customRegistryControlsToolsWithoutInitializingBuiltIns() {
+        runner().withUserConfiguration(CustomComponents.class)
+                .withPropertyValues("assistant.shell-image=")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(ToolRegistry.class).callbacks()).isEmpty();
+                });
+    }
+
+    @Test
+    void duplicateToolBindingsFailAtStartup() {
+        runner().withUserConfiguration(ExtraTool.class)
+                .withBean("duplicateSample", ToolBinding.class,
+                        () -> new ToolBinding(Kind.READ, ToolCallbacks.from(new ToolExecutorTest.SampleTool())[0]))
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasRootCauseMessage("Duplicate tool name: sample");
+                });
+    }
+
+    @Test
+    void customAndBuiltInToolsShareTheSameDuplicateNameCheck() throws Exception {
+        var workspace = Files.createDirectory(directory.resolve("project"));
+        runner().withBean(ToolBinding.class, () -> new ToolBinding(Kind.READ, ToolCallbacks.from(new Object() {
+            @Tool(name = "read_file", description = "custom read")
+            public String read() {
+                return "custom";
+            }
+        })[0])).withPropertyValues(
+                "assistant.data-directory=" + directory.resolve("data")).run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasRootCauseMessage("Duplicate tool name: read_file");
+                });
+    }
+
+    @Test
+    void agentExposesRegisteredToolsAndExecutesAReadTool() throws Exception {
+        var workspace = Files.createDirectory(directory.resolve("project"));
+        Files.writeString(workspace.resolve("README.md"), "hello from workspace");
+        var modelCalls = new AtomicInteger();
+        runner().withBean(ChatModel.class, () -> prompt -> {
+            var options = (ToolCallingChatOptions) prompt.getOptions();
+            assertThat(options.getToolCallbacks()).extracting(tool -> tool.getToolDefinition().name())
+                    .contains("read_file").hasSize(7);
+            if (modelCalls.incrementAndGet() == 1) {
+                var call = new ToolCall("read", "function", "read_file", "{\"path\":\"README.md\"}");
+                var assistant = AssistantMessage.builder().content("").toolCalls(List.of(call)).build();
+                return new ChatResponse(List.of(new Generation(assistant)));
+            }
+            var response = (ToolResponseMessage) prompt.getInstructions().getLast();
+            assertThat(response.getResponses()).singleElement().satisfies(tool -> {
+                assertThat(tool.id()).isEqualTo("read");
+                assertThat(tool.responseData()).contains("1: hello from workspace");
+            });
+            return TestSupport.text("read complete");
+        }).withPropertyValues(
+                "assistant.data-directory=" + directory.resolve("data"))
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var reply = context.getBean(ConversationService.class)
+                            .send("coding", TestSupport.message("read README.md", workspace));
+                    assertThat(reply.answer()).isEqualTo("read complete");
+                    assertThat(reply.modelCalls()).isEqualTo(2);
+                });
+    }
+
+    @Test
+    void builtInToolsRequireAnExplicitShellImage() {
+        runner().withPropertyValues(
+                "assistant.data-directory=" + directory.resolve("data"),
+
+                "assistant.shell-image=").run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasRootCauseMessage(
+                            "Set assistant.shell-image to a Docker image to enable execute");
+                });
     }
 
     @Test
@@ -83,34 +215,33 @@ class ComponentWiringTest {
                 .withInitializer(new org.springframework.boot.test.context.ConfigDataApplicationContextInitializer())
                 .withBean(ObjectMapper.class, () -> new ObjectMapper().findAndRegisterModules())
                 .withConfiguration(AutoConfigurations.of(AssistantAutoConfiguration.class))
-                .withPropertyValues("assistant.data-directory=" + directory, "assistant.model.provider=demo");
+                .withPropertyValues("assistant.data-directory=" + directory.resolve("data"),
+
+                        "assistant.shell-image=local-test-image", "assistant.model.provider=demo");
     }
 
     @TestConfiguration(proxyBeanMethods = false)
     static class CustomComponents {
-        @Bean @com.guodi.assistant.versioning.ComponentRevision(id = "custom-model", version = "1.0.0") ChatModel customModel() { return prompt -> TestSupport.text("custom answer"); }
-        @Bean @com.guodi.assistant.versioning.ComponentRevision(id = "custom-store", version = "1.0.0") ConversationStore customStore() { return new TestSupport.Store(); }
-        @Bean MemoryModule customMemory() { return new NoMemory(); }
-        @Bean @com.guodi.assistant.versioning.ComponentRevision(id = "custom-context", version = "1.0.0") ContextBuilder customContext() {
-            return (history, memories, message) -> List.of(new UserMessage(message));
+        @Bean ChatModel customModel() { return prompt -> TestSupport.text("custom answer"); }
+        @Bean FileConversationStore customStore(AssistantProperties properties) {
+            return TestSupport.store(properties.dataDirectory().resolve("custom"));
         }
-        @Bean @com.guodi.assistant.versioning.ComponentRevision(id = "custom-tools", version = "1.0.0")
-        ToolExecutor customTools(org.springframework.beans.factory.ObjectProvider<ToolCallback> callbacks,
-                com.guodi.assistant.config.AssistantProperties properties) {
-            var selected = com.guodi.assistant.component.tool.VersionedToolCallback.select(
-                    callbacks.orderedStream().toList(), properties.tools());
-            var delegate = new com.guodi.assistant.component.tool.RegisteredToolExecutor(selected, 1000);
-            return new ToolExecutor() {
-                public List<ToolCallback> callbacks() { return delegate.callbacks(); }
-                public List<ToolResponse> execute(List<ToolCall> calls, ToolContext context) { return delegate.execute(calls, context); }
-            };
+        @Bean NoteMemory customMemory(AssistantProperties properties) {
+            return TestSupport.disabledMemory(properties.dataDirectory().resolve("custom-memory"));
+        }
+        @Bean WindowContextBuilder customContext() {
+            return new WindowContextBuilder("custom system prompt", 0, 0, 0);
+        }
+        @Bean
+        ToolRegistry customTools() {
+            return new ToolRegistry(List.of());
         }
     }
 
     @TestConfiguration(proxyBeanMethods = false)
     static class ExtraTool {
-        @Bean ToolCallback sampleTool() {
-            return com.guodi.assistant.component.tool.VersionedToolCallback.from("1.0.0", new RegisteredToolExecutorTest.SampleTool())[0];
+        @Bean ToolBinding sampleTool() {
+            return new ToolBinding(ToolBinding.Kind.READ, ToolCallbacks.from(new ToolExecutorTest.SampleTool())[0]);
         }
     }
 }

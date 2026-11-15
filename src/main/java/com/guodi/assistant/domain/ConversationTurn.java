@@ -4,10 +4,13 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
-import com.guodi.assistant.versioning.ExecutionManifest;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
-/** Schema 2 freezes the execution manifest; schema 1 records remain readable without fabricated versions. */
-public record ConversationTurn(int schemaVersion, UUID id, Instant startedAt, Status status,List<TranscriptMessage> messages, String failure, ExecutionManifest manifest) {
+@JsonIgnoreProperties("manifest")
+public record ConversationTurn(int schemaVersion, UUID id, Instant startedAt, Status status,
+        List<TranscriptMessage> messages, String failure) {
+
+    public static final int CURRENT_SCHEMA = 3;
 
     public enum Status { RUNNING, COMPLETED, FAILED }
 
@@ -15,20 +18,20 @@ public record ConversationTurn(int schemaVersion, UUID id, Instant startedAt, St
         messages = List.copyOf(messages);
     }
 
-    public static ConversationTurn start(String userMessage, ExecutionManifest manifest) {
-        return new ConversationTurn(2, UUID.randomUUID(), Instant.now(), Status.RUNNING,
-                List.of(new TranscriptMessage("user", userMessage, List.of(), List.of())), null, manifest);
+    public static ConversationTurn start(String userMessage) {
+        return new ConversationTurn(CURRENT_SCHEMA, UUID.randomUUID(), Instant.now(), Status.RUNNING,
+                List.of(new TranscriptMessage("user", userMessage, List.of(), List.of())), null);
     }
 
     public ConversationTurn checkpoint(List<TranscriptMessage> transcript) {
-        return new ConversationTurn(schemaVersion, id, startedAt, Status.RUNNING, transcript, null, manifest);
+        return new ConversationTurn(CURRENT_SCHEMA, id, startedAt, Status.RUNNING, transcript, null);
     }
 
     public ConversationTurn complete() {
-        return new ConversationTurn(schemaVersion, id, startedAt, Status.COMPLETED, messages, null, manifest);
+        return new ConversationTurn(CURRENT_SCHEMA, id, startedAt, Status.COMPLETED, messages, null);
     }
 
     public ConversationTurn fail(String reason) {
-        return new ConversationTurn(schemaVersion, id, startedAt, Status.FAILED, messages, reason, manifest);
+        return new ConversationTurn(CURRENT_SCHEMA, id, startedAt, Status.FAILED, messages, reason);
     }
 }

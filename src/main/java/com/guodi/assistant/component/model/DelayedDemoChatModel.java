@@ -8,12 +8,8 @@ import org.springframework.ai.chat.prompt.Prompt;
 
 // 导入 AgentException：交给核心框架处理的 Agent 执行异常。
 import com.guodi.assistant.core.AgentException;
-// 导入 ComponentRevision：项目自定义的组件身份与版本注解。
-import com.guodi.assistant.versioning.ComponentRevision;
 
 /** Adds local model latency so waiting messages and steer can be observed. */
-// 声明实现的身份与行为版本，供启动校验和 manifest 记录；这个注解本身不负责把类注册为 Spring Bean。
-@ComponentRevision(id = "demo", version = "1.1.0")
 // 继承原演示模型，只增加等待；识别文字和生成工具调用仍由父类完成。
 public final class DelayedDemoChatModel extends DemoChatModel {
     // 标明下面的方法实现接口或覆盖父类方法；签名不匹配时编译器会报错。
@@ -31,7 +27,7 @@ public final class DelayedDemoChatModel extends DemoChatModel {
             // 把等待中断交给通用 Agent 错误处理，本次模型调用不会继续执行父类逻辑。
             throw new AgentException("演示模型等待被中断。");
         }
-        // 等待结束后调用父类的本地演示逻辑，返回普通文本或工具调用。
+        // 等待结束后调用父类的本地演示逻辑，返回普通文本。
         return super.call(prompt);
     }
 }

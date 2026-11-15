@@ -1,5 +1,6 @@
 package com.guodi.assistant.core;
 
+import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.List;
 import java.util.function.Consumer;
@@ -35,9 +36,9 @@ public final class AgentRuntime {
     }
 
     /** Runs one admitted message through the existing Harness lifecycle. */
-    public Reply chat(String conversationId, String message, List<SessionMessage> steers,
+    public Reply chat(String conversationId, String message, Path projectPath, List<SessionMessage> steers,
             Consumer<AgentEvent> events) {
-        return harness.aroundRun(conversationId, message, steers, events, this::runLoop);
+        return harness.aroundRun(conversationId, message, projectPath, steers, events, this::runLoop);
     }
 
     private void runLoop(AgentExecution execution) {

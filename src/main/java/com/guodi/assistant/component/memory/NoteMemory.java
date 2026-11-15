@@ -16,31 +16,29 @@ import java.util.UUID;
 import com.guodi.assistant.component.storage.JsonFiles;
 // 导入 ConversationTurn：持久化的一轮对话数据。
 import com.guodi.assistant.domain.ConversationTurn;
-// 导入 MemoryModule：长期记忆接口。
-import com.guodi.assistant.port.MemoryModule;
 
 /** Deliberately simple: persist only explicit "记住：" notes, scoped to the conversation. */
-// 声明实现的身份与行为版本，供启动校验和 manifest 记录；这个注解本身不负责把类注册为 Spring Bean。
-@com.guodi.assistant.versioning.ComponentRevision(id = "notes", version = "1.0.0")
 // 按会话隔离的备注记忆实现；只保存用户明确要求记住的文本。
-public final class NoteMemory implements MemoryModule {
+public final class NoteMemory {
     // 记忆存储根目录；每个 conversationId 会映射到自己的子目录。
     private final Path root;
     // 复用 JSON 文件工具完成读取和原子写入，不在这里重复实现文件操作。
     private final JsonFiles files;
+    private final boolean enabled;
 
-    // 构造器接收记忆目录和 JSON 文件工具。
-    public NoteMemory(Path root, JsonFiles files) {
+    public NoteMemory(Path root, JsonFiles files, boolean enabled) {
         // 保存记忆根目录。
         this.root = root;
         // 保存文件读写工具实例。
         this.files = files;
+        this.enabled = enabled;
     }
 
-    // 标明下面的方法实现接口或覆盖父类方法；签名不匹配时编译器会报错。
-    @Override
-    // 每轮开始时读取该会话的备注；当前实现不使用 query 做相关性检索。
-    public List<String> recall(String conversationId, String query) {
+    public List<String> recall(String conversationId) {
+        if (!enabled) {
+            return List.of();
+        }
+
         // ponytail: latest 20 explicit notes; replace this component when semantic retrieval is needed.
         // 把会话 ID 转成目录名，读取目录中的 Note 对象，再把列表转换成流。
         return files.readDirectory(JsonFiles.conversationDirectory(root, conversationId), Note.class).stream()
@@ -50,10 +48,12 @@ public final class NoteMemory implements MemoryModule {
                 .limit(20).map(Note::text).toList();
     }
 
-    // 标明下面的方法实现接口或覆盖父类方法；签名不匹配时编译器会报错。
-    @Override
     // Harness 在成功提交一轮后调用；当前实现只检查本轮最开始的用户消息。
     public void observe(String conversationId, ConversationTurn turn) {
+        if (!enabled) {
+            return;
+        }
+
         // 取本轮第一条消息的正文，并用 strip 去掉两端空白。
         String message = turn.messages().getFirst().text().strip();
         // 必须以中文或英文冒号形式的 '记住：' 开头；普通聊天不会自动变成长期备注。

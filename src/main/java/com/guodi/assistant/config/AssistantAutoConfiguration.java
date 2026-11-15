@@ -2,57 +2,59 @@ package com.guodi.assistant.config;
 
 import java.io.IOException;
 import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.openai.api.OpenAiApi;
-import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
 
 import com.guodi.assistant.component.context.WindowContextBuilder;
-import com.guodi.assistant.component.memory.NoMemory;
 import com.guodi.assistant.component.memory.NoteMemory;
 import com.guodi.assistant.component.model.DelayedDemoChatModel;
 import com.guodi.assistant.component.storage.FileConversationStore;
 import com.guodi.assistant.component.storage.JsonFiles;
-import com.guodi.assistant.component.tool.*;
+import com.guodi.assistant.component.storage.FileSessionStore;
+import com.guodi.assistant.component.tool.ToolBinding;
+import com.guodi.assistant.component.tool.ToolExecutor;
+import com.guodi.assistant.component.tool.ToolRegistry;
+import com.guodi.assistant.component.tool.ToolRoundExecutor;
 import com.guodi.assistant.core.AgentRuntime;
 import com.guodi.assistant.core.AssistantHarness;
 import com.guodi.assistant.core.ConversationService;
-import com.guodi.assistant.port.*;
-import com.guodi.assistant.versioning.ComponentRevision;
-import com.guodi.assistant.versioning.ExecutionManifest;
-import com.guodi.assistant.versioning.ExecutionManifest.PromptSnapshot;
 
-/** Composition root. Revision checks run before the application accepts a chat. */
+/** Composes the default assistant components. */
 @AutoConfiguration
 @EnableConfigurationProperties(AssistantProperties.class)
+@Import(BuiltinToolConfiguration.class)
 public class AssistantAutoConfiguration {
-    
+
     @Bean
     @ConditionalOnMissingBean(ChatModel.class)
-    @ComponentRevision(id = "openai-compatible", version = "1.1.0")
-
-    
     ChatModel chatModel(AssistantProperties properties) {
         var model = properties.model();
         if (model.provider() == AssistantProperties.Provider.DEMO) {
             return new DelayedDemoChatModel();
         }
         if (!StringUtils.hasText(model.apiKey()) || !StringUtils.hasText(model.name())) {
-            throw new IllegalStateException("真实模型需要设置 AI_API_KEY 和 AI_MODEL。");
+            throw new IllegalStateException("真实模型需要设置环境变量 AI_API_KEY 和 application.yml 中的 assistant.model.name。");
         }
         var timeout = Duration.ofSeconds(model.timeoutSeconds());
         var client = HttpClient.newBuilder().connectTimeout(timeout).build();
@@ -72,58 +74,54 @@ public class AssistantAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    ConversationStore conversationStore(AssistantProperties properties, ObjectMapper json) {
+    FileConversationStore conversationStore(AssistantProperties properties, ObjectMapper json) {
         return new FileConversationStore(properties.dataDirectory().resolve("conversations"), new JsonFiles(json));
     }
 
     @Bean
     @ConditionalOnMissingBean
-    MemoryModule memoryModule(AssistantProperties properties, ObjectMapper json) {
-        return switch (properties.components().memory().id()) {
-            case "none" -> new NoMemory();
-            case "notes" -> new NoteMemory(properties.dataDirectory().resolve("memory"), new JsonFiles(json));
-            default -> throw new IllegalStateException("Register the requested MemoryModule as a versioned Bean");
-        };
-    }
-
-    @Bean
-    PromptSnapshot promptSnapshot(AssistantProperties properties) throws IOException {
-        return ReleaseManifestFactory.loadPrompt(properties.prompt());
+    FileSessionStore sessionStore(AssistantProperties properties, ObjectMapper json) {
+        return new FileSessionStore(properties.dataDirectory().resolve("sessions"), new JsonFiles(json));
     }
 
     @Bean
     @ConditionalOnMissingBean
-    ContextBuilder contextBuilder(AssistantProperties properties, PromptSnapshot prompt) {
+    NoteMemory noteMemory(AssistantProperties properties, ObjectMapper json) {
+        boolean enabled = properties.memory() == AssistantProperties.Memory.NOTES;
+        return new NoteMemory(properties.dataDirectory().resolve("memory"), new JsonFiles(json), enabled);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    WindowContextBuilder contextBuilder(AssistantProperties properties) throws IOException {
+        String prompt = properties.systemPrompt().getContentAsString(StandardCharsets.UTF_8);
         var context = properties.context();
-        return new WindowContextBuilder(prompt.text(), context.recentTurns(), context.historyChars(), context.memoryChars());
+        return new WindowContextBuilder(prompt, context.recentTurns(), context.historyChars(), context.memoryChars());
     }
 
     @Bean
     @ConditionalOnMissingBean
-    ToolExecutor toolExecutor(ObjectProvider<ToolCallback> callbacks, AssistantProperties properties) {
-        var selected = VersionedToolCallback.select(callbacks.orderedStream().toList(), properties.tools());
-        int resultChars = properties.limits().toolResultChars();
-        return switch (properties.components().toolExecutor().version()) {
-            case "1.0.0" -> new RegisteredToolExecutor(selected, resultChars);
-            case "1.1.0" -> new CancellableToolExecutor(selected, resultChars);
-            default -> throw new IllegalStateException("Register the requested ToolExecutor as a versioned Bean");
-        };
+    ToolRegistry toolRegistry(ObjectProvider<ToolBinding> bindings) {
+        return new ToolRegistry(bindings.stream().toList());
+    }
+
+    @Bean(name = "assistantReadWorkers", destroyMethod = "shutdown")
+    ExecutorService assistantReadWorkers() {
+        return new ThreadPoolExecutor(4, 4, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(8), Thread.ofPlatform().name("assistant-read-", 0).factory());
     }
 
     @Bean
-    ToolCallback currentTimeTool() {
-        return VersionedToolCallback.from("1.0.0", new CurrentTimeTool())[0];
+    @ConditionalOnMissingBean
+    ToolExecutor toolExecutor(ToolRegistry registry, AssistantProperties properties) {
+        return new ToolExecutor(registry, properties.limits().toolResultChars());
     }
 
     @Bean
-    ToolCallback videoSearchLinksTool() {
-        return VersionedToolCallback.from("1.0.0", new VideoSearchLinksTool())[0];
-    }
-
-    @Bean
-    ExecutionManifest executionManifest(AssistantProperties properties, PromptSnapshot prompt,
-            ConfigurableListableBeanFactory beans, ObjectMapper json) {
-        return ReleaseManifestFactory.create(properties, prompt, beans, json);
+    @ConditionalOnMissingBean
+    ToolRoundExecutor toolRoundExecutor(ToolRegistry registry, ToolExecutor executor,
+            @Qualifier("assistantReadWorkers") ExecutorService readWorkers) {
+        return new ToolRoundExecutor(registry, executor, readWorkers);
     }
 
     @Bean
@@ -133,12 +131,14 @@ public class AssistantAutoConfiguration {
     }
 
     @Bean
-    AssistantHarness assistantHarness(ConversationStore conversations, MemoryModule memory,
-            ContextBuilder context, ToolExecutor tools, ExecutionManifest manifest) {
-        return new AssistantHarness(conversations, memory, context, tools, manifest);
+    AssistantHarness assistantHarness(FileConversationStore conversations, NoteMemory memory,
+            WindowContextBuilder context, ToolRegistry toolRegistry, ToolRoundExecutor toolRounds) {
+        return new AssistantHarness(conversations, memory, context, toolRegistry, toolRounds);
     }
+
     @Bean
-    ConversationService conversationService(AgentRuntime runtime) {
-        return new ConversationService(runtime);
+    ConversationService conversationService(AgentRuntime runtime, FileSessionStore sessions,
+            FileConversationStore transcripts) {
+        return new ConversationService(runtime, sessions, transcripts);
     }
 }

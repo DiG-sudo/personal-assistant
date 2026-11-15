@@ -2,6 +2,9 @@ package com.guodi.assistant.web;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -12,6 +15,8 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -19,7 +24,10 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
+import com.guodi.assistant.component.model.DemoChatModel;
+import com.guodi.assistant.component.tool.ToolRegistry;
 import com.guodi.assistant.core.AssistantHarness;
 import com.guodi.assistant.core.AssistantHarness.Reply;
 import com.guodi.assistant.core.ConversationService;
@@ -33,24 +41,27 @@ import com.guodi.assistant.core.event.TurnCompleted;
 import com.guodi.assistant.core.event.TurnStarted;
 import com.guodi.assistant.core.event.TurnSteer;
 import com.guodi.assistant.domain.ConversationTurn;
-import com.guodi.assistant.versioning.ExecutionManifest;
+import com.guodi.assistant.domain.ConversationInfo;
 
 @RestController
 @Validated
 public class ChatController {
     private final ConversationService conversations;
     private final AssistantHarness harness;
-    private final ExecutionManifest manifest;
+    private final ChatModel model;
+    private final ToolRegistry tools;
 
-    public ChatController(ConversationService conversations, AssistantHarness harness, ExecutionManifest manifest) {
+    public ChatController(ConversationService conversations, AssistantHarness harness, ChatModel model,
+            ToolRegistry tools) {
         this.conversations = conversations;
         this.harness = harness;
-        this.manifest = manifest;
+        this.model = model;
+        this.tools = tools;
     }
 
     @PostMapping("/api/chat")
     public ResponseEntity<?> chat(@Valid @RequestBody Request request) {
-        Reply reply = conversations.send(request.conversationId(),new SessionMessage(request.messageId(), request.message()));
+        Reply reply = conversations.send(request.conversationId(), sessionMessage(request));
         if (reply == null) {
             return ResponseEntity.accepted().body(new SteerReceipt(request.messageId(), "STEERED"));
         }
@@ -59,11 +70,12 @@ public class ChatController {
 
     @PostMapping("/api/chat/stream")
     public void chatStream(@Valid @RequestBody Request request, HttpServletResponse response) throws IOException {
+        SessionMessage message = sessionMessage(request);
         response.setContentType("text/plain;charset=UTF-8");
         PrintWriter writer = response.getWriter();
         try {
             Reply reply = conversations.send(request.conversationId(),
-                    new SessionMessage(request.messageId(), request.message()),
+                    message,
                     event -> {
                         if (!(event instanceof RequestFailed) || response.isCommitted()) {
                             writeProgress(writer, event);
@@ -80,6 +92,22 @@ public class ChatController {
         }
     }
 
+    private static SessionMessage sessionMessage(Request request) {
+        try {
+            Path path = Path.of(request.projectPath());
+            if (!path.isAbsolute()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "projectPath must be an absolute directory");
+            }
+            Path root = path.toRealPath();
+            if (!Files.isDirectory(root) || root.getParent() == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "projectPath must be a project directory");
+            }
+            return new SessionMessage(request.messageId(), request.message(), root);
+        } catch (IOException | InvalidPathException error) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "projectPath must be an existing directory", error);
+        }
+    }
+
     private static void writeProgress(PrintWriter writer, AgentEvent event) {
         switch (event) {
             case TurnStarted started -> writer.println("开始处理 " + started.turnId());
@@ -91,19 +119,15 @@ public class ChatController {
                 }
             }
             case ToolsFinished finished -> {
-                // ponytail: 默认执行器通过结果前缀报告失败。有独立状态时改用状态计数。
-                long failed = finished.results().stream().filter(result -> {
-                    String data = result.responseData();
-                    return data.startsWith("工具未启用或不存在：") || data.startsWith("工具执行失败：");
-                }).count();
+                long failed = finished.outcomes().stream().filter(outcome -> !outcome.success()).count();
                 writer.println("本批工具结束：成功 %d，失败 %d，耗时 %d ms"
-                        .formatted(finished.results().size() - failed, failed, finished.elapsedMs()));
-                for (var result : finished.results()) {
+                        .formatted(finished.outcomes().size() - failed, failed, finished.elapsedMs()));
+                for (var result : finished.outcomes()) {
                     String preview = terminalLine(result.responseData());
                     if (preview.length() > 240) {
                         preview = preview.substring(0, 240) + "…";
                     }
-                    writer.println("  %s → %s".formatted(terminalLine(result.name()), preview));
+                    writer.println("  %s → %s".formatted(terminalLine(result.call().name()), preview));
                 }
             }
             case TurnCompleted completed -> {
@@ -129,6 +153,18 @@ public class ChatController {
         return ResponseEntity.ok(new SteerReceipt(request.messageId(), "STEERED"));
     }
 
+    @GetMapping("/api/conversations")
+    public List<ConversationInfo> sessions() {
+        return conversations.list();
+    }
+
+    @GetMapping("/api/conversations/{conversationId}/session")
+    public ConversationInfo session(
+            @PathVariable @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}") String conversationId) {
+        return conversations.info(conversationId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "会话不存在。"));
+    }
+
     @GetMapping("/api/conversations/{conversationId}")
     public List<ConversationTurn> history(
             @PathVariable @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}") String conversationId) {
@@ -137,14 +173,15 @@ public class ChatController {
 
     @GetMapping("/api/components")
     public Map<String, Object> components() {
-        return Map.of("mode", manifest.components().get("model").revision().id().equals("demo") ? "demo" : "live",
-                "manifest", manifest, "tools", manifest.tools().stream().map(tool -> tool.revision().id()).toList());
+        return Map.of("mode", model instanceof DemoChatModel ? "demo" : "live",
+                "tools", tools.callbacks().stream().map(callback -> callback.getToolDefinition().name()).toList());
     }
 
     public record Request(
             @NotBlank @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}") String conversationId,
             @NotNull UUID messageId,
-            @NotBlank @Size(max = 16000) String message) {}
+            @NotBlank @Size(max = 16000) String message,
+            @NotBlank String projectPath) {}
 
     public record SteerRequest(
             @NotBlank @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}") String conversationId,

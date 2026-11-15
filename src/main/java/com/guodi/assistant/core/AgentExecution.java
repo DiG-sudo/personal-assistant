@@ -1,5 +1,6 @@
 package com.guodi.assistant.core;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -9,6 +10,7 @@ import com.guodi.assistant.domain.ConversationTurn;
 /** One run only. Harness owns snapshots/commits; Runtime owns the actual model-call count. */
 public final class AgentExecution {
     private final String conversationId;
+    private final Path projectPath;
     private ConversationTurn turn;
     private List<ConversationTurn> history = List.of();
     private List<String> memories = List.of();
@@ -16,15 +18,17 @@ public final class AgentExecution {
     private final List<ConversationService.SessionMessage> steers;
     private final Consumer<AgentEvent> events;
 
-    public AgentExecution(String conversationId, ConversationTurn turn,
+    public AgentExecution(String conversationId, ConversationTurn turn, Path projectPath,
             List<ConversationService.SessionMessage> steers, Consumer<AgentEvent> events) {
         this.conversationId = conversationId;
+        this.projectPath = projectPath;
         this.turn = turn;
         this.steers = steers;
         this.events = events;
     }
 
     public String conversationId() { return conversationId; }
+    public Path projectPath() { return projectPath; }
     public ConversationTurn turn() { return turn; }
     public List<ConversationTurn> history() { return history; }
     public List<String> memories() { return memories; }

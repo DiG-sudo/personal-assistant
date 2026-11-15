@@ -63,8 +63,8 @@ public final class JsonFiles {
         }
     }
 
-    // 内部方法：读取一个文件并转换成指定 Java 类型，调用者只能通过公共方法使用它。
-    private <T> T read(Path path, Class<T> type) {
+    // 读取一个 JSON 文件；不存在或无法解码时保留原始 I/O 错误。
+    public <T> T read(Path path, Class<T> type) {
         // 集中处理创建目录、写临时文件和替换目标文件时的 I/O 异常。
         try {
             // 先读取文件全部字节，再让 Jackson 按 type 反序列化；格式错误也会作为读取失败传播。

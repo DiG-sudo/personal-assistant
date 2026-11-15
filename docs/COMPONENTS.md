@@ -1,14 +1,14 @@
 # 组件开发指南
 
-扩展放在 com.guodi.assistant.extension 包及子包中。每个端口只能有一个活动 Bean；默认实现自动退出。版本组合由 resources/releases 下的清单选择。
+扩展配置和业务工具可以放在 `com.guodi.assistant.extension`。Harness 直接使用具体组件，Spring 在启动时装配。
 
 ## 新增工具
 
 ```java
 package com.guodi.assistant.extension;
 
-import com.guodi.assistant.component.tool.VersionedToolCallback;
-import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.support.ToolCallbacks;
+import com.guodi.assistant.component.tool.ToolBinding;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -16,8 +16,8 @@ import org.springframework.context.annotation.Configuration;
 @Configuration(proxyBeanMethods = false)
 public class GreetingConfiguration {
     @Bean
-    ToolCallback greetingTool() {
-        return VersionedToolCallback.from("1.0.0", new GreetingTool())[0];
+    ToolBinding greetingTool() {
+        return new ToolBinding(ToolBinding.Kind.READ, ToolCallbacks.from(new GreetingTool())[0]);
     }
 
     public static final class GreetingTool {
@@ -29,91 +29,31 @@ public class GreetingConfiguration {
 }
 ```
 
-复制一个新发布清单，在 tools 列表加入 `{id: greet, version: 1.0.0}`，启动时选择该清单。只注册 Bean 不会自动暴露未被选择的工具。
+声明 Bean 后，默认注册表会接入该工具。工具有 READ、WRITE 和 SHELL 三种执行类型。连续的 READ 可以并行，WRITE 和 SHELL 在当前工具轮中单独执行。启动时拒绝重复的工具名。具体工具负责参数校验、文件权限和 Shell 隔离。
 
-多方法工具可把每个版本化回调分别注册为 Bean。相同工具名允许注册不同版本，但发布清单只能选择其中一个。普通未声明版本的 ToolCallback 不进入生产装配。
+内置工具也通过 `ToolBinding` Bean 接入，由 `BuiltinToolConfiguration` 声明回调和执行类型。`AssistantAutoConfiguration.toolRegistry` 收集全部 `ToolBinding` Bean，`ToolRegistry` 按名称保存并检查重名。自定义工具应使用唯一的工具名，与内置工具同名会导致启动失败。默认装配需要工作区和 Shell 镜像配置。
 
-真实视频搜索可提供新工具版本，返回有来源 URL 的结构化结果。网络超时、输入校验、权限与写操作幂等由工具实现负责。
+## 组件装配
 
-## 替换记忆
+| 组件 | 职责 |
+| --- | --- |
+| Spring AI `ChatModel` | 发起模型请求，保留工具调用 ID |
+| `FileConversationStore` | 加载历史，按 turn ID 原子保存 |
+| `NoteMemory` | 按会话保存显式备注，`assistant.memory=none` 关闭读取和写入 |
+| `WindowContextBuilder` | 每次推理前组织系统提示、记忆、历史和本轮消息 |
+| `ToolRegistry` | 按名称登记全部工具 Bean，向模型提供定义 |
+| `ToolRoundExecutor` | 分批调度并保留模型给出的调用顺序 |
+| `ToolExecutor` | 执行单个回调并返回成功状态与正文 |
 
-```java
-package com.guodi.assistant.extension;
-
-import java.util.List;
-import com.guodi.assistant.domain.ConversationTurn;
-import com.guodi.assistant.port.MemoryModule;
-import com.guodi.assistant.versioning.ComponentRevision;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-@Configuration(proxyBeanMethods = false)
-public class MyMemoryConfiguration {
-    @Bean
-    @ComponentRevision(id = "my-memory", version = "1.0.0")
-    MemoryModule myMemory() {
-        return new MyMemory();
-    }
-
-    static final class MyMemory implements MemoryModule {
-        public List<String> recall(String conversationId, String query) {
-            return List.of(); // 接入自己的检索逻辑。
-        }
-        public void observe(String conversationId, ConversationTurn completedTurn) {
-            // 接入自己的记忆写入；按 completedTurn.id() 去重。
-        }
-    }
-}
-```
-
-新清单选择：
-
-```yaml
-assistant:
-  components:
-    memory: {id: my-memory, version: 1.0.0}
-```
-
-版本注解也可以放在具体实现类上。类注解优先于工厂方法。自定义实现与清单不匹配时拒绝启动。
-
-observe 只接收已提交的成功轮次，不修改原始聊天。更换实现前明确记忆范围、数据格式与迁移方式。默认按 conversationId 隔离；跨会话记忆需要单独明确 owner 身份。
-
-## 替换其他组件
-
-| Bean 类型 | 清单或版本声明 | 契约 |
-| --- | --- | --- |
-| ChatModel | 类或 Bean 方法的 ComponentRevision | 一次 call 做一次模型调用，保留工具 ID，尊重手动执行设置 |
-| ConversationStore | components.store | 按时间加载，按 turn ID 原子保存，保留 manifest |
-| ContextBuilder | components.context | 每步 prepare 选择模型视图、保留本轮完整工具配对；不改历史 |
-| ToolExecutor | components.tool-executor | 暴露与执行共用允许列表；结果顺序与 ID 匹配清单工具 |
-
-模型继续使用 Spring AI ChatModel，不增加另一套模型调用协议。第三方最终类或 Lambda 可以在 Bean 工厂方法上声明版本。
-
-上下文的旧 build(history, memories, userMessage) 仍可使用。默认 prepare 每次推理调用它，并追加本轮已经提交的 assistant/tool 消息。只实现 build 时，日志明确标记 selection=unreported。
-
-若要根据本轮工具结果调整策略，覆盖 prepare(history, memories, activeTurn)，返回 ContextBuilder.ModelContext；其 messages 仅供本次模型请求使用。可通过 Optional.of(new Selection(turnIds, memoryIndexes)) 报告真实选择，记忆索引对应传入的 memories；未报告时用 Optional.empty()。这些证据不另存一份聊天或记忆。
-
-自定义上下文组件可注入 ExecutionManifest.PromptSnapshot，使用其 text 作为已校验系统提示；不要自行再次读取可变文件。
-
-额外参数可通过 ConfigurationSnapshot.versionedSettings() 提供给运行快照。只返回不可变、脱敏 JSON 数据。
-
-## 多版本选择
-
-多个实现可通过 ConditionalOnProperty 或 Profile 分别启用。例如根据 assistant.components.context.version 选择上下文组件。任何时候同一端口仅启用一个实现。
-
-默认装配只提供当前已实现版本；修改清单版本号不会自动生成新算法。
-
-更新与回退步骤见 [版本更新指南](VERSIONING.md)。Runtime 与 Harness 不负责组件目录、版本解析或热加载。
+默认组件由 `AssistantAutoConfiguration` 创建。用户提供同类型的 Bean 时，Spring 优先使用该 Bean。
 
 ## 调整执行策略的位置
 
 - 聊天执行入口：ConversationService.send 负责会话串行，再调用 Runtime.chat(conversationId, message, steers)；Runtime 将 this::runLoop 交给 Harness.aroundRun，保留原有生命周期方向。历史查询由 Controller 直接调用 Harness.history。
 - 一轮恢复、提交和记忆时机：AssistantHarness.aroundRun；executeTurn 直接调用 restoreHistory、recallMemory、observeMemory 等方法。
-- 每步上下文构造：aroundReasoning 先应用并提交一条待处理 steer，保存成功后移除，再调用 ContextBuilder.prepare 并构造 Prompt。
+- 每步上下文构造：aroundReasoning 先应用并提交一条待处理 steer，保存成功后移除，再调用 WindowContextBuilder.prepare 并构造 Prompt。
 - 真实模型请求的包装：aroundModelCall；真实调用函数接受 Prompt，Runtime 在调用前检查最终请求和计数。当前没有自动重试。
-- 工具组执行和结果检查点：aroundToolRound；允许列表、顺序和普通业务错误属于 ToolExecutor。
+- 工具组执行和结果检查点：aroundToolRound；工具表由 ToolRegistry 维护，调度由 ToolRoundExecutor 负责，单工具结果由 ToolExecutor 生成。
 - 权威检查点：Harness.checkpoint / commit。工具意图成功保存后才执行，禁止包装层自动重放不确定的外部副作用。
 
 不要在策略组件中重新保存对话或维护另一份消息列表。新增资源由相应执行边界负责 finally 清理。
-
-固定 Runtime/Harness 直接协作，不设置额外的协调接口。模型、记忆、上下文、工具执行器与存储的组件契约保留。

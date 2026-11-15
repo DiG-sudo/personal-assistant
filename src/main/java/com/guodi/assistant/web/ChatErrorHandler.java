@@ -14,6 +14,12 @@ import com.guodi.assistant.core.AgentException;
 public class ChatErrorHandler {
     private static final Logger log = LoggerFactory.getLogger(ChatErrorHandler.class);
 
+    @ExceptionHandler(com.guodi.assistant.core.ConversationService.ProjectPathMismatchException.class)
+    ResponseEntity<Map<String, String>> projectMismatch(
+            com.guodi.assistant.core.ConversationService.ProjectPathMismatchException error) {
+        return ResponseEntity.status(409).body(Map.of("error", error.getMessage()));
+    }
+
     @ExceptionHandler(AgentException.class)
     ResponseEntity<Map<String, String>> agentFailure(AgentException error) {
         return ResponseEntity.status(502).body(Map.of("error", error.getMessage()));

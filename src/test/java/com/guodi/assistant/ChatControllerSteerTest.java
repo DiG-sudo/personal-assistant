@@ -1,5 +1,6 @@
 package com.guodi.assistant;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -7,12 +8,16 @@ import java.util.function.Consumer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse;
+import org.springframework.ai.chat.messages.AssistantMessage.ToolCall;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import com.guodi.assistant.core.AgentException;
 import com.guodi.assistant.core.AssistantHarness;
+import com.guodi.assistant.component.tool.ToolOutcome;
+import com.guodi.assistant.component.tool.ToolRegistry;
+
+import org.springframework.ai.chat.model.ChatModel;
 import com.guodi.assistant.core.ConversationService;
 import com.guodi.assistant.core.ConversationService.SessionMessage;
 import com.guodi.assistant.core.event.AgentEvent;
@@ -31,6 +36,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 class ChatControllerSteerTest {
     private final ObjectMapper json = new ObjectMapper();
+    private final Path projectPath = Path.of(System.getProperty("java.io.tmpdir")).toRealPath();
+
+    ChatControllerSteerTest() throws Exception {}
 
     @Test
     void historyBelongsToHarnessWithoutSessionAdmission() {
@@ -38,7 +46,7 @@ class ChatControllerSteerTest {
         AssistantHarness harness = mock(AssistantHarness.class);
         var history = java.util.List.<com.guodi.assistant.domain.ConversationTurn>of();
         when(harness.history("chat")).thenReturn(history);
-        var controller = new ChatController(conversations, harness, TestSupport.manifest());
+        var controller = new ChatController(conversations, harness, mock(ChatModel.class), mock(ToolRegistry.class));
 
         org.assertj.core.api.Assertions.assertThat(controller.history("chat")).isSameAs(history);
 
@@ -50,24 +58,24 @@ class ChatControllerSteerTest {
     void promotedChatReturnsAReceiptInsteadOfAnExecutionError() throws Exception {
         ConversationService conversations = mock(ConversationService.class);
         var http = MockMvcBuilders.standaloneSetup(
-                new ChatController(conversations, mock(AssistantHarness.class), TestSupport.manifest())).build();
+                new ChatController(conversations, mock(AssistantHarness.class), mock(ChatModel.class), mock(ToolRegistry.class))).build();
         UUID id = UUID.randomUUID();
 
         http.perform(post("/api/chat").contentType(MediaType.APPLICATION_JSON)
                 .content(json.writeValueAsString(Map.of(
-                        "conversationId", "chat", "messageId", id, "message", "supplement"))))
+                        "conversationId", "chat", "messageId", id, "message", "supplement", "projectPath", projectPath.toString()))))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.messageId").value(id.toString()))
                 .andExpect(jsonPath("$.status").value("STEERED"));
 
-        verify(conversations).send("chat", new SessionMessage(id, "supplement"));
+        verify(conversations).send("chat", new SessionMessage(id, "supplement", projectPath));
     }
 
     @Test
     void steerUsesOnlyTheConversationAndInputId() throws Exception {
         ConversationService conversations = mock(ConversationService.class);
         var http = MockMvcBuilders.standaloneSetup(
-                new ChatController(conversations, mock(AssistantHarness.class), TestSupport.manifest())).build();
+                new ChatController(conversations, mock(AssistantHarness.class), mock(ChatModel.class), mock(ToolRegistry.class))).build();
         UUID id = UUID.randomUUID();
         when(conversations.steer("chat", id)).thenReturn(true);
 
@@ -84,11 +92,11 @@ class ChatControllerSteerTest {
     void promotedStreamReturns202WithoutStartingATurn() throws Exception {
         ConversationService conversations = mock(ConversationService.class);
         var http = MockMvcBuilders.standaloneSetup(
-                new ChatController(conversations, mock(AssistantHarness.class), TestSupport.manifest())).build();
+                new ChatController(conversations, mock(AssistantHarness.class), mock(ChatModel.class), mock(ToolRegistry.class))).build();
 
         http.perform(post("/api/chat/stream").contentType(MediaType.APPLICATION_JSON)
                 .content(json.writeValueAsString(Map.of("conversationId", "chat",
-                        "messageId", UUID.randomUUID(), "message", "supplement"))))
+                        "messageId", UUID.randomUUID(), "message", "supplement", "projectPath", projectPath.toString()))))
                 .andExpect(status().isAccepted())
                 .andExpect(content().string(""));
     }
@@ -97,25 +105,25 @@ class ChatControllerSteerTest {
     void streamCountsExistingToolFailuresAndReportsLaterRunFailureInTheBody() throws Exception {
         ConversationService conversations = mock(ConversationService.class);
         var http = MockMvcBuilders.standaloneSetup(
-                new ChatController(conversations, mock(AssistantHarness.class), TestSupport.manifest())).build();
+                new ChatController(conversations, mock(AssistantHarness.class), mock(ChatModel.class), mock(ToolRegistry.class))).build();
         UUID id = UUID.randomUUID();
-        when(conversations.send(eq("chat"), eq(new SessionMessage(id, "go")), any())).thenAnswer(invocation -> {
+        when(conversations.send(eq("chat"), eq(new SessionMessage(id, "go", projectPath)), any())).thenAnswer(invocation -> {
             Consumer<AgentEvent> events = invocation.getArgument(2);
             UUID turnId = UUID.randomUUID();
             UUID steerId = UUID.randomUUID();
             events.accept(new TurnStarted(turnId));
             events.accept(new TurnSteer(turnId, steerId));
             events.accept(new ToolsFinished(List.of(
-                    new ToolResponse("1", "current_time", "2026-11-12T06:32:00Z"),
-                    new ToolResponse("2", "missing", "工具未启用或不存在：missing"),
-                    new ToolResponse("3", "lookup", "工具执行失败：参数无效")), 18));
+                    new ToolOutcome(new ToolCall("1", "function", "current_time", "{}"), "工具执行失败：这只是成功工具的返回正文", true),
+                    new ToolOutcome(new ToolCall("2", "function", "missing", "{}"), "工具未启", false),
+                    new ToolOutcome(new ToolCall("3", "function", "lookup", "{}"), "工具执行失败：参数无效", false)), 18));
             var error = new AgentException("模型没有返回有效响应。");
             events.accept(new RequestFailed(error.getMessage()));
             throw error;
         });
 
         http.perform(post("/api/chat/stream").contentType(MediaType.APPLICATION_JSON)
-                .content(json.writeValueAsString(Map.of("conversationId", "chat", "messageId", id, "message", "go"))))
+                .content(json.writeValueAsString(Map.of("conversationId", "chat", "messageId", id, "message", "go", "projectPath", projectPath.toString()))))
                 .andExpect(status().isOk())
                 .andExpect(content().string(containsString("本批工具结束：成功 1，失败 2，耗时 18 ms")))
                 .andExpect(content().string(containsString("lookup → 工具执行失败：参数无效")))
@@ -127,10 +135,10 @@ class ChatControllerSteerTest {
     void streamKeepsTheHttpErrorStatusWhenTheTurnHasNotStarted() throws Exception {
         ConversationService conversations = mock(ConversationService.class);
         var http = MockMvcBuilders.standaloneSetup(
-                new ChatController(conversations, mock(AssistantHarness.class), TestSupport.manifest()))
+                new ChatController(conversations, mock(AssistantHarness.class), mock(ChatModel.class), mock(ToolRegistry.class)))
                 .setControllerAdvice(new ChatErrorHandler()).build();
         UUID id = UUID.randomUUID();
-        when(conversations.send(eq("chat"), eq(new SessionMessage(id, "go")), any())).thenAnswer(invocation -> {
+        when(conversations.send(eq("chat"), eq(new SessionMessage(id, "go", projectPath)), any())).thenAnswer(invocation -> {
             Consumer<AgentEvent> events = invocation.getArgument(2);
             var error = new AgentException("无法开始执行。");
             events.accept(new RequestFailed(error.getMessage()));
@@ -138,7 +146,7 @@ class ChatControllerSteerTest {
         });
 
         http.perform(post("/api/chat/stream").contentType(MediaType.APPLICATION_JSON)
-                .content(json.writeValueAsString(Map.of("conversationId", "chat", "messageId", id, "message", "go"))))
+                .content(json.writeValueAsString(Map.of("conversationId", "chat", "messageId", id, "message", "go", "projectPath", projectPath.toString()))))
                 .andExpect(status().isBadGateway())
                 .andExpect(jsonPath("$.error").value("无法开始执行。"));
     }

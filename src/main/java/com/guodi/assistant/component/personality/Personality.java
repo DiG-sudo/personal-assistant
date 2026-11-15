@@ -1,31 +1,18 @@
 package com.guodi.assistant.component.personality;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
-import com.guodi.assistant.versioning.ComponentRevision;
-import com.guodi.assistant.versioning.ExecutionManifest.Ref;
-import com.guodi.assistant.versioning.Fingerprints;
-
 /** Immutable personality content. Construction does not activate it in a conversation. */
-@ComponentRevision(id = "personality", version = "1.0.0")
-public record Personality(Ref revision, String coreSetting, String expression, String dialogueExamples) {
+public record Personality(String coreSetting, String expression, String dialogueExamples) {
 
     public Personality {
-        Objects.requireNonNull(revision, "Personality revision is required");
-        if (revision.id() == null || revision.id().isBlank()
-                || revision.version() == null || revision.version().isBlank()
-                || revision.version().equals("latest")) {
-            throw new IllegalArgumentException("Personality requires an explicit id and content version");
-        }
         Objects.requireNonNull(coreSetting, "Core setting is required");
         Objects.requireNonNull(expression, "Expression conventions are required");
         Objects.requireNonNull(dialogueExamples, "Dialogue examples are required");
     }
 
-    /** Built-in lively-companion@1.0.0. Preserve this content when releasing another revision. */
-    public static Personality livelyV1() {
-        return new Personality(new Ref("lively-companion", "1.0.0"),
+    public static Personality lively() {
+        return new Personality(
                 """
                 你是与用户长期相处的 AI 助手，性格活泼、跳脱，脑回路偶尔拐到意想不到的地方。
                 相处像一个熟悉、好聊、有自己判断的搭档：愿意接梗、拆台，也能把正事办好。
@@ -80,9 +67,5 @@ public record Personality(Ref revision, String coreSetting, String expression, S
         return "## 核心设定\n" + coreSetting
                 + "\n\n## 表达约定\n" + expression
                 + "\n\n## 对话示例（风格参考，非真实聊天记录）\n" + dialogueExamples + "\n";
-    }
-
-    public String sha256() {
-        return Fingerprints.sha256(text().getBytes(StandardCharsets.UTF_8));
     }
 }

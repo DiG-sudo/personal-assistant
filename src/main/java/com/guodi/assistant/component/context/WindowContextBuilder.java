@@ -6,7 +6,7 @@ import java.util.ArrayList;
 // 导入 List：列表接口及 List.of / List.copyOf 等不可修改列表工厂。
 import java.util.List;
 // 导入 Optional：显式表示可有可无的选择诊断。
-import java.util.Optional;
+import java.util.UUID;
 
 // 导入 Message：Spring AI 的通用消息类型。
 import org.springframework.ai.chat.messages.Message;
@@ -21,13 +21,8 @@ import com.guodi.assistant.domain.ConversationTurn;
 import com.guodi.assistant.domain.ConversationTurn.Status;
 // 导入 TranscriptMessage：可保存、可转换成模型消息的聊天数据。
 import com.guodi.assistant.domain.TranscriptMessage;
-// 导入 ContextBuilder：模型上下文构建接口。
-import com.guodi.assistant.port.ContextBuilder;
-
-// 声明实现的身份与行为版本，供启动校验和 manifest 记录；这个注解本身不负责把类注册为 Spring Bean。
-@com.guodi.assistant.versioning.ComponentRevision(id = "window", version = "1.0.0")
-// ContextBuilder 的窗口实现；按条数和字符预算选择历史，拼接成一次模型请求的输入。
-public final class WindowContextBuilder implements ContextBuilder {
+/** Builds the model input from a bounded window of complete historical turns. */
+public final class WindowContextBuilder {
     // 固定系统提示词，决定助手身份与规则；final 表示构造后不再替换这个字段。
     private final String systemPrompt;
     // 最多选择多少个已完成的历史轮次。
@@ -49,16 +44,6 @@ public final class WindowContextBuilder implements ContextBuilder {
         this.memoryChars = memoryChars;
     }
 
-    // 标明下面的方法实现接口或覆盖父类方法；签名不匹配时编译器会报错。
-    @Override
-    // 基础接口的实现；把单条用户文本转成完整本轮消息，再复用下面的 prepare。
-    public List<Message> build(List<ConversationTurn> history, List<String> memories, String userMessage) {
-        // 先创建 UserMessage，再转为可持久化消息；List.of 包成单元素列表，最后取 prepare 返回的 messages。
-        return prepare(history, memories, List.of(TranscriptMessage.from(new UserMessage(userMessage)))).messages();
-    }
-
-    // 标明下面的方法实现接口或覆盖父类方法；签名不匹配时编译器会报错。
-    @Override
     // 推理前的完整入口；为本次请求重新组合系统提示词、记忆、历史和当前轮次。
     public ModelContext prepare(List<ConversationTurn> history, List<String> memories,
             // 接收本轮已提交消息；它们在最后完整追加，不参与历史窗口裁剪。
@@ -126,9 +111,21 @@ public final class WindowContextBuilder implements ContextBuilder {
         }
         // 把当前轮次的全部已提交消息按原顺序追加；工具结果因此能用于下一次推理。
         activeTurn.stream().map(TranscriptMessage::toMessage).forEach(messages::add);
-        // 返回不可修改的模型视图，并用 Optional.of 表示这次能够提供准确的选择明细。
-        return new ModelContext(messages, Optional.of(new Selection(
-                // 把选中历史轮次映射为 ID；连同前面记录的记忆索引，构成 Selection。
-                selected.stream().map(ConversationTurn::id).toList(), memoryIndexes)));
+        return new ModelContext(messages, new Selection(
+                selected.stream().map(ConversationTurn::id).toList(), memoryIndexes));
+    }
+
+    public record ModelContext(List<Message> messages, Selection selection) {
+        public ModelContext {
+            messages = List.copyOf(messages);
+        }
+    }
+
+    /** Memory indexes refer to the recalled notes for the current turn. */
+    public record Selection(List<UUID> turnIds, List<Integer> memoryIndexes) {
+        public Selection {
+            turnIds = List.copyOf(turnIds);
+            memoryIndexes = List.copyOf(memoryIndexes);
+        }
     }
 }
