@@ -7,6 +7,8 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.prompt.Prompt;
+import com.guodi.assistant.config.AssistantProperties.Budget;
 import org.springframework.ai.tool.ToolCallback;
 
 import com.guodi.assistant.component.context.ContextView;
@@ -63,14 +65,27 @@ final class TestSupport {
         }
     }
 
+    static Budget budget(int windowTokens) {
+        return new Budget(windowTokens, 0.8, 0.15, Math.min(128, windowTokens / 4),
+                Math.min(256, windowTokens / 4), 8192, 4096, 100, 8);
+    }
+
     static WindowContextBuilder contextBuilder() {
         return contextBuilder(new ToolResultStore(), null);
     }
 
-    static WindowContextBuilder contextBuilder(
-            ToolResultStore results, Integer previewChars) {
-        return new WindowContextBuilder(results, previewChars,
-                request -> { throw new AssertionError("Unexpected summary request"); }, new ObjectMapper(), Integer.MAX_VALUE);
+    static WindowContextBuilder contextBuilder(ToolResultStore results, Integer previewTokens) {
+        var budget = budget(262144);
+        if (previewTokens != null) {
+            budget = new Budget(budget.windowTokens(), budget.compactRatio(), budget.keepRecentRatio(),
+                    budget.maxOutputTokens(), budget.summaryOutputTokens(), previewTokens * 2, previewTokens,
+                    budget.maxModelCalls(), budget.maxToolsPerRound());
+        }
+        return new WindowContextBuilder(results, new ObjectMapper(), budget);
+    }
+
+    static ChatResponse unexpectedModelCall(Prompt prompt) {
+        throw new AssertionError("Unexpected model request");
     }
 
     static ToolRegistry toolRegistry(ToolCallback... callbacks) {

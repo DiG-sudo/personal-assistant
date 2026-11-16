@@ -142,7 +142,8 @@ public class AssistantHarness {
         ModelContext view;
         try {
             int appended = execution.appendedMessages().size();
-            view = context.prepare(systemPrompt, toolRegistry.callbacks(), execution.view(), execution.appendedMessages(), execution.projectPath());
+            view = context.prepare(systemPrompt, toolRegistry.callbacks(), execution.view(),
+                    execution.appendedMessages(), execution.projectPath(), reasoning);
             contextStore.save(execution.conversationId(), new Checkpoint(view.view(),
                     execution.turn().id(), execution.turn().messages().size()));
             execution.prepared(view.view());

@@ -68,7 +68,7 @@ class AssistantHarnessTest {
                     .filter(message -> message instanceof org.springframework.ai.chat.messages.ToolResponseMessage)
                     .map(message -> ((org.springframework.ai.chat.messages.ToolResponseMessage) message)
                             .getResponses().getFirst().responseData()))
-                    .singleElement().asString().contains("结果未知");
+                    .singleElement().asString().contains("outcome is unknown", "inspect the actual state");
             return TestSupport.text("new answer");
         }).send("a", TestSupport.message("new request"));
         assertThat(calls.get()).isEqualTo(1);
@@ -99,7 +99,7 @@ class AssistantHarnessTest {
         };
         var context = spy(TestSupport.contextBuilder());
         var harness = new AssistantHarness(store, TestSupport.contextStore(directory), "system", context, tools, TestSupport.toolRounds(tools));
-        var reply = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 10000, 4)).send("a", TestSupport.message("hello"));
+        var reply = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 4)).send("a", TestSupport.message("hello"));
         assertThat(reply.modelCalls()).isEqualTo(2);
         var inputs = mockingDetails(context).getInvocations().stream()
                 .filter(invocation -> invocation.getMethod().getName().equals("prepare")).toList();
@@ -142,7 +142,7 @@ class AssistantHarnessTest {
         var tools = TestSupport.toolRegistry();
         var harness = new AssistantHarness(store, views, "system",
                 TestSupport.contextBuilder(), tools, TestSupport.toolRounds(tools));
-        var runtime = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 10000, 4));
+        var runtime = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 4));
         assertThatThrownBy(() -> runtime.send("a", TestSupport.message("hello"))).hasMessageContaining("view save failed");
         verifyNoInteractions(model);
         assertThat(store.load("a").getFirst().status()).isEqualTo(ConversationTurn.Status.FAILED);
@@ -167,7 +167,7 @@ class AssistantHarnessTest {
         };
         var harness = new AssistantHarness(brokenStore, TestSupport.contextStore(directory), "system",
                 TestSupport.contextBuilder(), tools, TestSupport.toolRounds(tools));
-        var runtime = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 10000, 4));
+        var runtime = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 4));
         assertThatThrownBy(() -> runtime.send("a", TestSupport.message("hello"))).hasMessageContaining("result save failed");
         assertThat(calls.get()).isEqualTo(1);
         assertThat(counter.executions.get()).isEqualTo(1);
@@ -221,7 +221,7 @@ class AssistantHarnessTest {
         var tools = TestSupport.toolRegistry();
         var harness = new AssistantHarness(store, TestSupport.contextStore(directory), "system",
                 TestSupport.contextBuilder(), tools, TestSupport.toolRounds(tools));
-        return TestSupport.conversations(directory, new AgentRuntime(model, harness, 4, 10000, 4));
+        return TestSupport.conversations(directory, new AgentRuntime(model, harness, 4, 4));
     }
 
     private static void await(CountDownLatch latch) {

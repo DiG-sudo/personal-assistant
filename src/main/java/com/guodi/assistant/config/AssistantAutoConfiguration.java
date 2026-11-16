@@ -11,6 +11,8 @@ import java.util.concurrent.TimeUnit;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.openai.api.OpenAiApi;
@@ -64,13 +66,29 @@ public class AssistantAutoConfiguration {
         var api = OpenAiApi.builder().apiKey(model.apiKey()).baseUrl(model.baseUrl())
                 .completionsPath(model.completionsPath())
                 .restClientBuilder(RestClient.builder().requestFactory(requestFactory)).build();
+        var budget = properties.budget().forModel(model);
         var options = OpenAiChatOptions.builder().model(model.name()).internalToolExecutionEnabled(false);
         if (StringUtils.hasText(model.reasoningEffort())) {
             options.reasoningEffort(model.reasoningEffort());
         }
-        return OpenAiChatModel.builder().openAiApi(api)
+        var adapter = OpenAiChatModel.builder().openAiApi(api)
                 .defaultOptions(options.build())
                 .retryTemplate(RetryTemplate.builder().maxAttempts(1).build()).build();
+        return request -> {
+            var requestOptions = request.getOptions();
+            int outputTokens = requestOptions == null || requestOptions.getMaxTokens() == null
+                    ? budget.maxOutputTokens() : Math.min(requestOptions.getMaxTokens(), model.maxOutputTokens());
+            var transport = OpenAiChatOptions.builder().internalToolExecutionEnabled(false);
+            if (requestOptions instanceof ToolCallingChatOptions tools) {
+                transport.toolCallbacks(tools.getToolCallbacks());
+            }
+            if (model.outputTokenParameter() == AssistantProperties.OutputTokenParameter.MAX_COMPLETION_TOKENS) {
+                transport.maxCompletionTokens(outputTokens);
+            } else {
+                transport.maxTokens(outputTokens);
+            }
+            return adapter.call(new Prompt(request.getInstructions(), transport.build()));
+        };
     }
 
     @Bean
@@ -87,10 +105,8 @@ public class AssistantAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    WindowContextBuilder contextBuilder(ToolResultStore results, ChatModel model, ObjectMapper json,
-            AssistantProperties properties) {
-        // Reuse the existing character limit until token budgeting is unified.
-        return new WindowContextBuilder(results, null, model, json, properties.limits().maxContextChars());
+    WindowContextBuilder contextBuilder(ToolResultStore results, ObjectMapper json, AssistantProperties properties) {
+        return new WindowContextBuilder(results, json, properties.budget().forModel(properties.model()));
     }
 
     @Bean
@@ -132,8 +148,8 @@ public class AssistantAutoConfiguration {
 
     @Bean
     AgentRuntime agentRuntime(ChatModel model, AssistantHarness harness, AssistantProperties properties) {
-        var limits = properties.limits();
-        return new AgentRuntime(model, harness, limits.maxModelCalls(), limits.maxContextChars(), limits.maxToolsPerRound());
+        var budget = properties.budget();
+        return new AgentRuntime(model, harness, budget.maxModelCalls(), budget.maxToolsPerRound());
     }
 
     @Bean

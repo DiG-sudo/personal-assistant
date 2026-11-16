@@ -100,7 +100,7 @@ Controller 提供 `GET /api/conversations`（全部会话，按活动时间倒�
 | 尚未应用的 steer | 本轮临时列表；不替代聊天记录 |
 | 临时模型输入 | WindowContextBuilder.ModelContext |
 
-原始轮次仅有一个已提交 turn 游标。派生视图记录 sourceTurnId/sourceMessageCount，恢复时仅补齐该位置之后的原始消息；它不替代原始聊天，也不保存系统提示词和工具定义。checkpoint 保存失败立即停止，工具意图提交成功后才执行外部工具。每次最终请求检查字符预算，失败请求也计入 modelCalls；到达调用预算后不执行没有后续推理机会的新工具。
+原始轮次仅有一个已提交 turn 游标。派生视图记录 sourceTurnId/sourceMessageCount，恢复时仅补齐该位置之后的原始消息；它不替代原始聊天，也不保存系统提示词和工具定义。checkpoint 保存失败立即停止，工具意图提交成功后才执行外部工具。Builder 检查正常及摘要请求的 token 估算和输出预留，摘要与普通请求的失败尝试也计入同一 modelCalls；到达调用预算后不执行没有后续推理机会的新工具。
 
 状态为 RUNNING → COMPLETED / FAILED。恢复残留 RUNNING 时保存失败记录，不自动重放可能已发生的工具副作用。
 
@@ -134,7 +134,7 @@ OpenAI 兼容适配器支持通过 application.yml 中的 assistant.model.reason
 
 ## 已移除：独立备注记忆
 
-不再提供记忆组件、备注召回/写入、memory 配置或记忆字符预算。WindowContextBuilder.prepare(systemPrompt, toolDefinitions, view, appendedMessages, projectPath) 使用持久化视图和新增消息，完整轮次由原有存储链路独立保存。旧 data/memory 文件不删除。原来仅用于报告记忆故障的 Reply.warnings 字段一并移除。
+不再提供记忆组件、备注召回/写入、memory 配置或记忆字符预算。WindowContextBuilder.prepare(systemPrompt, toolDefinitions, view, appendedMessages, projectPath, modelCall) 使用持久化视图和新增消息，完整轮次由原有存储链路独立保存。旧 data/memory 文件不删除。原来仅用于报告记忆故障的 Reply.warnings 字段一并移除。
 
 ## 增量上下文视图
 
@@ -142,4 +142,4 @@ OpenAI 兼容适配器支持通过 application.yml 中的 assistant.model.reason
 
 原始记录提交成功后，AgentExecution 只收集新增消息；每次推理前，Harness 先保存 data/contexts/<编码会话ID>/view.json，再更新内存视图并清空新增集合。视图检查点包含 view、sourceTurnId、sourceMessageCount。两类文件分别原子提交，不提供跨文件事务；原始记录领先时，恢复只补齐未纳入视图的尾部。没有视图的旧会话使用空视图及已有原始消息初始化，不改写旧消息内容。
 
-恢复残留 RUNNING 仍转为 FAILED，不重放工具。所有状态的消息都可进入视图；没有结果的工具意图仅在派生视图中补齐“结果未知”响应，保留原始调用和原始记录。ContextView 保存六字段 JSON 摘要对象和带 turnId 的保留消息。Builder 只对 appendedMessages 处理大结果，由 ToolResultStore 发布内容寻址的项目文件；compact 显式更新旧摘要并保留近期轮次。compact 已通过现有 ChatModel 请求并严格校验 JSON 摘要；prepare 已复用现有字符上限自动触发 compact；大结果阈值和摘要统一计数暂未接入。旧版列表或文本摘要视图从完整原始记录重建，原始游标与视图长度保持独立。Runtime 的最终 64000 字符保护仍在。
+恢复残留 RUNNING 仍转为 FAILED，不重放工具。所有状态的消息都可进入视图；没有结果的工具意图仅在派生视图中补齐“结果未知”响应，保留原始调用和原始记录。ContextView 保存六字段 JSON 摘要对象和带 turnId 的保留消息。Builder 只对 appendedMessages 处理大结果，由 ToolResultStore 发布内容寻址的项目文件；compact 更新旧摘要并按 token 预算保留近期完整消息/工具轮；不按 turnId 切分，也不固定当前轮或用户请求，工具调用意图与全部结果一起保留或压缩。至少保留最新完整单位，允许其超过近期预算。compact 经本轮共享 modelCall 入口调用现有 ChatModel 并严格校验 JSON 摘要；prepare 按 assistant.budget 的 token 比例自动触发。大结果阈值及摘要统一计数已启用。旧版列表或文本摘要视图从完整原始记录重建，原始游标与视图长度保持独立。上下文大小检查统一归 Builder，Runtime 删除旧字符检查，仅保留实际调用次数与单批工具数量限制。模型适配层将输出上限映射到配置指定的 max_tokens 或 max_completion_tokens。

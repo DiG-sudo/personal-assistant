@@ -194,22 +194,23 @@ class ComponentWiringTest {
     void normalSendAutomaticallyCompactsSavesAndReusesTheView() {
         var summaryCalls = new AtomicInteger();
         var answerCalls = new AtomicInteger();
-        runner().withPropertyValues("assistant.limits.max-context-chars=1500")
+        runner().withPropertyValues("assistant.budget.window-tokens=10000",
+                        "assistant.budget.max-output-tokens=128", "assistant.budget.summary-output-tokens=256")
                 .withBean(ChatModel.class, () -> prompt -> {
                     if (prompt.getInstructions().getFirst().getText().contains("handoff summary")) {
                         summaryCalls.incrementAndGet();
-                        assertThat(prompt.getContents()).contains("older question", "older answer")
-                                .doesNotContain("recent question", "continue");
+                        assertThat(prompt.getContents()).contains("older question")
+                                .doesNotContain("older answer", "recent question", "continue");
                         return TestSupport.text(TestSupport.summaryJson("older progress"));
                     }
                     answerCalls.incrementAndGet();
                     assertThat(prompt.getContents()).contains("older progress", "recent question", "recent answer")
-                            .doesNotContain("older question", "older answer");
+                            .doesNotContain("older question");
                     return TestSupport.text("done");
                 }).run(context -> {
                     assertThat(context).hasNotFailed();
                     var transcript = context.getBean(FileConversationStore.class);
-                    var older = TestSupport.completed("older question " + "x".repeat(1800), "older answer");
+                    var older = TestSupport.completed("older question " + "x ".repeat(8500), "older answer");
                     var recent = TestSupport.completed("recent question", "recent answer");
                     transcript.save("auto", older);
                     transcript.save("auto", recent);
@@ -219,13 +220,62 @@ class ComponentWiringTest {
                     var checkpoint = views.load("auto");
                     assertThat(checkpoint.view().summary().goal()).isEqualTo("older progress");
                     assertThat(checkpoint.view().messages()).extracting(entry -> entry.message().text())
-                            .containsExactly("recent question", "recent answer", "continue");
+                            .containsExactly("older answer", "recent question", "recent answer", "continue");
                     assertThat(service.send("auto", TestSupport.message("next")).answer()).isEqualTo("done");
                     assertThat(summaryCalls).hasValue(1);
                     assertThat(answerCalls).hasValue(2);
                     assertThat(transcript.load("auto").getFirst()).isEqualTo(older);
                     assertThat(views.load("auto").view().messages()).extracting(entry -> entry.message().text())
                             .contains("done", "next");
+                });
+    }
+
+    @Test
+    void normalSendCompactsTheCurrentTurnBeforeTheNextReasoningCall() {
+        var summaries = new AtomicInteger();
+        var reasoning = new AtomicInteger();
+        runner().withUserConfiguration(ExtraTool.class)
+                .withPropertyValues("assistant.budget.window-tokens=10000",
+                        "assistant.budget.max-output-tokens=128", "assistant.budget.summary-output-tokens=256")
+                .withBean(ChatModel.class, () -> prompt -> {
+                    if (prompt.getInstructions().getFirst().getText().contains("handoff summary")) {
+                        summaries.incrementAndGet();
+                        assertThat(prompt.getContents()).contains("current request", "earlier reasoning")
+                                .doesNotContain("latest-call");
+                        return TestSupport.text(TestSupport.summaryJson("continue current request"));
+                    }
+                    if (reasoning.incrementAndGet() == 1) {
+                        return new ChatResponse(List.of(new Generation(AssistantMessage.builder()
+                                .content("earlier reasoning " + "x ".repeat(4000))
+                                .toolCalls(List.of(new ToolCall("first-call", "function", "sample", "{}"))).build())));
+                    }
+                    if (reasoning.get() == 2) {
+                        return new ChatResponse(List.of(new Generation(AssistantMessage.builder()
+                                .content("latest verification " + "y ".repeat(4000))
+                                .toolCalls(List.of(new ToolCall("latest-call", "function", "sample", "{}"))).build())));
+                    }
+                    assertThat(prompt.getContents()).contains("continue current request").doesNotContain("earlier reasoning");
+                    assertThat(((AssistantMessage) prompt.getInstructions().get(2)).getToolCalls())
+                            .extracting(ToolCall::id).containsExactly("latest-call");
+                    assertThat(prompt.getInstructions().getLast()).isInstanceOf(ToolResponseMessage.class);
+                    return TestSupport.text("done");
+                }).run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var service = context.getBean(ConversationService.class);
+                    var reply = service.send("split", TestSupport.message("current request"));
+                    assertThat(reply.answer()).isEqualTo("done");
+                    assertThat(reply.modelCalls()).isEqualTo(4);
+                    assertThat(summaries).hasValue(1);
+                    assertThat(reasoning).hasValue(3);
+                    var views = context.getBean(com.guodi.assistant.component.storage.FileContextStore.class);
+                    var checkpoint = views.load("split");
+                    assertThat(checkpoint.view().summary().goal()).isEqualTo("continue current request");
+                    assertThat(checkpoint.view().messages()).hasSize(2);
+                    assertThat(checkpoint.sourceMessageCount()).isEqualTo(5);
+                    var raw = context.getBean(FileConversationStore.class).load("split").getFirst();
+                    assertThat(raw.messages()).hasSize(6);
+                    assertThat(raw.messages().get(1).text()).contains("earlier reasoning");
+                    assertThat(raw.status()).isEqualTo(com.guodi.assistant.domain.ConversationTurn.Status.COMPLETED);
                 });
     }
 
@@ -242,9 +292,29 @@ class ComponentWiringTest {
     }
 
     @Test
+    void modelCapabilitiesClampTheConfiguredWorkingAndOutputBudgets() {
+        runner().withPropertyValues("assistant.model.context-window-tokens=131072",
+                "assistant.model.max-output-tokens=8192").run(context -> {
+            assertThat(context).hasNotFailed();
+            var properties = context.getBean(AssistantProperties.class);
+            var effective = properties.budget().forModel(properties.model());
+            assertThat(effective.windowTokens()).isEqualTo(131072);
+            assertThat(effective.maxOutputTokens()).isEqualTo(8192);
+            assertThat(effective.summaryOutputTokens()).isEqualTo(8192);
+            assertThat(effective.inputTokens()).isEqualTo(122880);
+            assertThat(effective.compactAtTokens()).isEqualTo(98304);
+            assertThat(effective.keepRecentTokens()).isEqualTo(18432);
+        });
+    }
+
+    @Test
     void invalidConfigurationFailsAtStartup() {
-        runner().withPropertyValues("assistant.limits.max-model-calls=0").run(context ->
-                assertThat(context).hasFailed());
+        for (String property : List.of("assistant.budget.max-model-calls=0",
+                "assistant.budget.compact-ratio=0", "assistant.budget.keep-recent-ratio=0.9",
+                "assistant.budget.tool-result-preview-tokens=8192",
+                "assistant.model.context-window-tokens=16384")) {
+            runner().withPropertyValues(property).run(context -> assertThat(context).hasFailed());
+        }
     }
 
     private ApplicationContextRunner runner() {
@@ -263,8 +333,8 @@ class ComponentWiringTest {
         @Bean FileConversationStore customStore(AssistantProperties properties) {
             return TestSupport.store(properties.dataDirectory().resolve("custom"));
         }
-        @Bean WindowContextBuilder customContext(ChatModel model, ObjectMapper json) {
-            return new WindowContextBuilder(new ToolResultStore(), null, model, json, 64000);
+        @Bean WindowContextBuilder customContext(ObjectMapper json) {
+            return new WindowContextBuilder(new ToolResultStore(), json, TestSupport.budget(64000));
         }
         @Bean
         ToolRegistry customTools() {

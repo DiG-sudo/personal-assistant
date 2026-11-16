@@ -11,6 +11,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -28,8 +30,9 @@ class OpenAiModelAdapterTest {
     @TempDir Path directory;
     private final ObjectMapper json = new ObjectMapper().findAndRegisterModules();
 
-    @Test
-    void realAdapterLeavesToolExecutionToRuntimeAndUsesConfiguredEndpoint() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"max-tokens", "max-completion-tokens"})
+    void realAdapterLeavesToolExecutionToRuntimeAndUsesConfiguredEndpoint(String outputParameter) throws Exception {
         var requests = new ArrayList<JsonNode>();
         var server = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/custom/chat", exchange -> {
@@ -49,7 +52,8 @@ class OpenAiModelAdapterTest {
         });
         server.start();
         try {
-            runner(server).withPropertyValues("assistant.model.reasoning-effort=none").run(context -> {
+            runner(server).withPropertyValues("assistant.model.reasoning-effort=none",
+                    "assistant.model.output-token-parameter=" + outputParameter).run(context -> {
                 assertThat(context).hasNotFailed();
                 var harness = context.getBean(AssistantHarness.class);
                 var reply = context.getBean(ConversationService.class).send("provider", TestSupport.message("测试工具"));
@@ -58,6 +62,10 @@ class OpenAiModelAdapterTest {
                 assertThat(harness.history("provider").getFirst().messages()).hasSize(4);
                 assertThat(requests).hasSize(2);
                 assertThat(requests.getFirst().get("model").asText()).isEqualTo("fixture-model");
+                String field = outputParameter.replace('-', '_');
+                String otherField = field.equals("max_tokens") ? "max_completion_tokens" : "max_tokens";
+                assertThat(requests.getFirst().path(field).asInt()).isEqualTo(32768);
+                assertThat(requests.getFirst().has(otherField)).isFalse();
                 assertThat(requests.getFirst().get("tools")).hasSize(8);
                 assertThat(requests.getLast().get("messages").toString()).contains("fixture-call", "tool");
                 assertThat(requests).allSatisfy(request ->
@@ -98,13 +106,15 @@ class OpenAiModelAdapterTest {
                         new com.guodi.assistant.component.context.ContextView.Entry(previous.id(), message)));
                 entries.add(new com.guodi.assistant.component.context.ContextView.Entry(current.id(), current.messages().getFirst()));
                 var view = new com.guodi.assistant.component.context.ContextView(TestSupport.summary("old goal"), entries);
-                var compacted = context.getBean(com.guodi.assistant.component.context.WindowContextBuilder.class).compact(view, 0);
+                var compacted = context.getBean(com.guodi.assistant.component.context.WindowContextBuilder.class)
+                        .compact(view, 1, context.getBean(org.springframework.ai.chat.model.ChatModel.class)::call);
                 assertThat(compacted.summary().goal()).isEqualTo("current JSON goal");
                 assertThat(compacted.messages()).hasSize(1);
                 assertThat(requests).hasSize(1);
                 var request = requests.getFirst();
                 assertThat(request.path("model").asText()).isEqualTo("fixture-model");
                 assertThat(request.path("tools").size()).isZero();
+                assertThat(request.path("max_tokens").asInt()).isEqualTo(8192);
                 assertThat(request.get("messages").get(0).path("content").asText()).contains("JSON object", "criticalContext");
                 try {
                     var payload = json.readTree(request.get("messages").get(1).path("content").asText());

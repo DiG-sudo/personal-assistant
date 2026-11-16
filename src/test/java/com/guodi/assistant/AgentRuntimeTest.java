@@ -101,8 +101,8 @@ class AgentRuntimeTest {
         var runtime = runtime(prompt -> {
             modelCalls.incrementAndGet();
             return TestSupport.text("unused");
-        }, 3, 1, 4, ignored -> {});
-        assertThatThrownBy(() -> runtime.send("chat", TestSupport.message("你好"))).isInstanceOf(AgentException.class).hasMessageContaining("上下文");
+        }, 3, 128, 4, ignored -> {});
+        assertThatThrownBy(() -> runtime.send("chat", TestSupport.message("你好".repeat(1000)))).isInstanceOf(AgentException.class).hasMessageContaining("Context");
         assertThat(modelCalls.get()).isZero();
     }
 
@@ -144,7 +144,7 @@ class AgentRuntimeTest {
         var runtime = TestSupport.conversations(directory, new AgentRuntime(prompt -> {
             actualCalls.incrementAndGet();
             throw new IllegalStateException("provider failure");
-        }, harness, 1, 10000, 4));
+        }, harness, 1, 4));
         assertThatThrownBy(() -> runtime.send("chat", TestSupport.message("hello"))).isInstanceOf(AgentException.class).hasMessageContaining("预算");
         assertThat(actualCalls.get()).isEqualTo(1);
         assertThat(execution.get().modelCalls()).isEqualTo(1);
@@ -177,7 +177,7 @@ class AgentRuntimeTest {
                 return response;
             }
         };
-        var conversations = TestSupport.conversations(directory, new AgentRuntime(model, harness, 4, 10000, 4));
+        var conversations = TestSupport.conversations(directory, new AgentRuntime(model, harness, 4, 4));
 
         var events = new ArrayList<AgentEvent>();
         var reply = conversations.send("steer-final", TestSupport.message("original"), events::add);
@@ -215,7 +215,7 @@ class AgentRuntimeTest {
                 return response;
             }
         };
-        var conversations = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 10000, 4));
+        var conversations = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 4));
 
         conversations.send("steer-tools", TestSupport.message("original"));
 
@@ -244,7 +244,7 @@ class AgentRuntimeTest {
             calls.incrementAndGet();
             return TestSupport.text("answer");
         };
-        var conversations = TestSupport.conversations(directory, new AgentRuntime(model, harness, 1, 10000, 4));
+        var conversations = TestSupport.conversations(directory, new AgentRuntime(model, harness, 1, 4));
 
         var events = new ArrayList<AgentEvent>();
         assertThatThrownBy(() -> conversations.send("steer-budget", TestSupport.message("original"), events::add))
@@ -284,7 +284,7 @@ class AgentRuntimeTest {
             calls.incrementAndGet();
             return TestSupport.text("answer");
         };
-        var conversations = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 10000, 4));
+        var conversations = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 4));
 
         assertThatThrownBy(() -> conversations.send("steer-save", TestSupport.message("original")))
                 .hasMessageContaining("steer save failed");
@@ -297,7 +297,7 @@ class AgentRuntimeTest {
         return runtime(model, maxCalls, 10000, 4, checkpoint).send("chat", TestSupport.message("你好")).modelCalls();
     }
 
-    private ConversationService runtime(ChatModel model, int maxCalls, int maxChars, int maxTools,
+    private ConversationService runtime(ChatModel model, int maxCalls, int windowTokens, int maxTools,
             Consumer<List<TranscriptMessage>> checkpoint) {
         var stored = TestSupport.store(directory);
         var journal = spy(stored);
@@ -309,9 +309,11 @@ class AgentRuntimeTest {
             return invocation.callRealMethod();
         }).when(journal).save(anyString(), any(ConversationTurn.class));
         var harness = new AssistantHarness(journal, TestSupport.contextStore(directory), "system",
-                TestSupport.contextBuilder(),
+                new com.guodi.assistant.component.context.WindowContextBuilder(
+                        new com.guodi.assistant.component.storage.ToolResultStore(),
+                        new com.fasterxml.jackson.databind.ObjectMapper(), TestSupport.budget(windowTokens)),
                 tools, TestSupport.toolRounds(tools));
-        return TestSupport.conversations(directory, new AgentRuntime(model, harness, maxCalls, maxChars, maxTools));
+        return TestSupport.conversations(directory, new AgentRuntime(model, harness, maxCalls, maxTools));
     }
 
     static final class CountingTool {

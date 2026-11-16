@@ -6,9 +6,15 @@ assistant:
   data-directory: ${ASSISTANT_DATA_DIR:./data}
   system-prompt: ${ASSISTANT_SYSTEM_PROMPT:classpath:prompts/assistant/v1.txt}
   shell-image: ${ASSISTANT_SHELL_IMAGE:ubuntu:24.04}
-  limits:
-    max-model-calls: 12
-    max-context-chars: 64000
+  budget:
+    window-tokens: 262144
+    compact-ratio: 0.8
+    keep-recent-ratio: 0.15
+    max-output-tokens: 32768
+    summary-output-tokens: 8192
+    tool-result-threshold-tokens: 8192
+    tool-result-preview-tokens: 4096
+    max-model-calls: 100
     max-tools-per-round: 8
   model:
     provider: openai
@@ -18,3 +24,6 @@ assistant:
     name: kimi-k3
     reasoning-effort: ""
     timeout-seconds: 600
+    context-window-tokens: 1048576
+    max-output-tokens: 1048576
+    output-token-parameter: max-tokens

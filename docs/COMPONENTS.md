@@ -51,7 +51,7 @@ public class GreetingConfiguration {
 
 - 聊天执行入口：ConversationService.send 负责会话串行，再调用 Runtime.chat(conversationId, message, steers)；Runtime 将 this::runLoop 交给 Harness.aroundRun，保留原有生命周期方向。历史查询由 Controller 直接调用 Harness.history。
 - 一轮恢复和提交时机：AssistantHarness.aroundRun；executeTurn 调用 restoreHistory 并提交状态。
-- 每步上下文构造：aroundReasoning 先应用并提交一条待处理 steer，保存成功后移除，再调用 WindowContextBuilder.prepare(systemPrompt, toolDefinitions, view, appendedMessages, projectPath)，保存视图及处理位置后使用其 Prompt。
+- 每步上下文构造：aroundReasoning 先应用并提交一条待处理 steer，保存成功后移除，再调用 WindowContextBuilder.prepare(systemPrompt, toolDefinitions, view, appendedMessages, projectPath, modelCall)，保存视图及处理位置后使用其 Prompt。
 - 真实模型请求的包装：aroundModelCall；真实调用函数接受 Prompt，Runtime 在调用前检查最终请求和计数。当前没有自动重试。
 - 工具组执行和结果检查点：aroundToolRound；工具表由 ToolRegistry 维护，调度由 ToolRoundExecutor 负责，单工具结果由 ToolExecutor 生成。
 - 权威检查点：Harness.checkpoint / commit。工具意图成功保存后才执行，禁止包装层自动重放不确定的外部副作用。
@@ -61,6 +61,6 @@ public class GreetingConfiguration {
 ### 上下文视图与结果文件（2026-11-16）
 
 - ContextView 是六字段 JSON 摘要对象和带 turnId 的保留消息；不复制完整 ConversationTurn。摘要及近期消息一次保存到现有 view.json，原始消息处理游标保持独立。
-- WindowContextBuilder 统一处理新增结果、视图合并和显式 compact；ToolResultStore 只写项目 .agent/tool-results/ 并返回相对路径。
+- WindowContextBuilder 统一处理新增结果、视图合并和自动 compact；按近期消息 token 预算保留完整单位（用户消息、普通助手消息、意图与全部结果组成的工具轮），允许轮内切分，turnId 不参与压缩选择。ToolResultStore 只写项目 .agent/tool-results/ 并返回相对路径。
 - prepare 的 projectPath 只定位项目结果目录，不属于模型上下文。已有视图不会重新处理大结果。
-- 预算留空：生产 resultPreviewChars=null；compact 已复用现有 ChatModel，prepare 在超过现有 max-context-chars 时实际调用压缩；统一计数留待后续处理。
+- 预算集中于 assistant.budget：默认工作窗口上限 256K，输出预留 32K，摘要输出 8K；输入空间的 80% 触发压缩，15% 保留近期原文。大结果超过 8K 后落盘，首尾预览及引用合计 4K。Builder 用已有 CL100K tokenizer 统一估算并检查正常/摘要请求；Runtime 不重复计量。摘要通过本轮 modelCall 回调，与推理共享 100 次实际调用限制，单批工具上限 8。模型窗口和输出限制由配置装配时收紧；传输层映射输出参数。

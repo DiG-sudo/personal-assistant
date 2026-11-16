@@ -34,12 +34,12 @@ class ContextAndStorageTest {
         var tools = List.of(ToolCallbacks.from(new ToolExecutorTest.SampleTool())[0]);
         var user = TranscriptMessage.from(new UserMessage("request"));
         var source = ConversationTurn.start("request");
-        var first = builder.prepare("system", tools, ContextView.empty(), List.of(new Entry(source.id(), user)), directory);
+        var first = builder.prepare("system", tools, ContextView.empty(), List.of(new Entry(source.id(), user)), directory, TestSupport::unexpectedModelCall);
         var intent = TranscriptMessage.from(AssistantMessage.builder().content("").toolCalls(List.of(
                 new AssistantMessage.ToolCall("c1", "function", "sample", "{}"))).build());
         var result = TranscriptMessage.from(ToolResponseMessage.builder().responses(List.of(
                 new ToolResponseMessage.ToolResponse("c1", "sample", "found"))).build());
-        var second = builder.prepare("system", tools, first.view(), List.of(new Entry(source.id(), intent), new Entry(source.id(), result)), directory);
+        var second = builder.prepare("system", tools, first.view(), List.of(new Entry(source.id(), intent), new Entry(source.id(), result)), directory, TestSupport::unexpectedModelCall);
         assertThat(first.view().messages()).extracting(Entry::message).containsExactly(user);
         assertThat(second.view().messages()).extracting(Entry::message).containsExactly(user, intent, result);
         assertThat(second.prompt().getInstructions()).extracting(message -> message.getMessageType().getValue())
@@ -51,7 +51,7 @@ class ContextAndStorageTest {
         store.save("chat", new Checkpoint(second.view(), source.id(), 3));
         var restored = new FileContextStore(directory, new ObjectMapper().findAndRegisterModules()).load("chat");
         var next = TranscriptMessage.from(new UserMessage("continue"));
-        var third = builder.prepare("updated system", List.of(), restored.view(), List.of(new Entry(java.util.UUID.randomUUID(), next)), directory);
+        var third = builder.prepare("updated system", List.of(), restored.view(), List.of(new Entry(java.util.UUID.randomUUID(), next)), directory, TestSupport::unexpectedModelCall);
         assertThat(third.view().messages()).extracting(Entry::message).containsExactly(user, intent, result, next);
         assertThat(third.prompt().getInstructions().getFirst().getText()).isEqualTo("updated system");
         assertThat(third.prompt().getInstructions().stream().filter(message -> message.getMessageType().getValue().equals("system")))

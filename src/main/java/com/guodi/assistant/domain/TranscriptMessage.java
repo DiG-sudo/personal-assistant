@@ -35,10 +35,4 @@ public record TranscriptMessage(String role, String text,
             default -> throw new IllegalStateException("Unknown persisted message role: " + role);
         };
     }
-
-    public int characters() {
-        return text.length()
-                + toolCalls.stream().mapToInt(call -> call.id().length() + call.name().length() + call.arguments().length()).sum()
-                + toolResponses.stream().mapToInt(result -> result.id().length() + result.name().length() + result.responseData().length()).sum();
-    }
 }

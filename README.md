@@ -92,7 +92,7 @@ mvn spring-boot:run
 
 最终请求地址由 `base-url + completions-path` 组成，避免重复拼接 `/v1`。更换服务商时同步调整地址、路径、模型名和对应密钥。`reasoning-effort` 留空时沿用服务商默认行为。
 
-`ASSISTANT_MODEL_PROVIDER`、`AI_BASE_URL`、`AI_COMPLETIONS_PATH`、`AI_MODEL`、`AI_REASONING_EFFORT` 不再用于模型配置。修改 YAML 后需要重启后端。模型默认连接与响应超时 60 秒，不自动重试。
+`ASSISTANT_MODEL_PROVIDER`、`AI_BASE_URL`、`AI_COMPLETIONS_PATH`、`AI_MODEL`、`AI_REASONING_EFFORT` 不再用于模型配置。修改 YAML 后需要重启后端。模型默认连接与响应超时 600 秒，不自动重试。
 
 如需本地演示模式，将 YAML 中的 `provider` 改为 `demo`，无需 API Key。
 
@@ -110,7 +110,25 @@ mvn spring-boot:run
 
 `data/sessions/` 保存会话 ID、项目路径、标题和创建/活动时间，`data/conversations/` 保存原始聊天和工具检查点，`data/contexts/` 保存派生视图及原始消息处理位置。数据目录已加入 Git 忽略规则。独立备注记忆已移除；旧的 `data/memory/` 文件保留在磁盘上，程序不再读取或写入。
 
-上下文复用已保存视图，只追加尚未处理的消息，不再按成功状态或固定轮数丢弃历史。系统提示词和工具定义每次传入并由 Builder 组装。运行消息总上限仍为 64000 字符，普通推理请求每轮上限 12 次；prepare 超限时会实际调用现有 ChatModel 生成 JSON 摘要，保存压缩视图后继续推理。大结果落盘/预览流程已接入，其阈值仍留空。额外摘要请求的统一计数与 token 预算后续处理。字符数属于近似预算，未计入服务商协议和工具定义开销。
+上下文复用已保存视图，只追加尚未处理的消息，不按成功状态或固定轮数丢弃历史。系统提示词和工具定义每次由 Builder 组装；摘要与近期消息保存在派生视图中，原始记录保持完整。压缩允许进入当前轮内部，工具意图及全部结果始终作为一个完整单位，至少保留最新单位。
+
+预算统一配置于 `assistant.budget`（1K = 1024 tokens）：
+
+| 配置 | 默认值 |
+| --- | --- |
+| `window-tokens` | 262144（256K 工作窗口上限） |
+| `max-output-tokens` / `summary-output-tokens` | 32768 / 8192 |
+| `compact-ratio` / `keep-recent-ratio` | 输入空间的 80% / 15% |
+| `tool-result-threshold-tokens` / `tool-result-preview-tokens` | 8192 / 4096 |
+| `max-model-calls` / `max-tools-per-round` | 每次用户请求 100 次 / 单批 8 个工具 |
+
+工作窗口与输出上限分别取应用配置和模型能力的较小值；输入空间等于工作窗口减正常输出预留。默认有效窗口为 256K 时，输入上限 229376 tokens，压缩触发线 183500，近期原文保留目标 34406。压缩后还包含系统提示词、工具定义和 JSON 摘要，不保证固定占总窗口的比例。
+
+大工具结果完整保存在项目 `.agent/tool-results/`，模型看到首尾预览、相对路径及 `read_file` 分页说明；首尾和引用合计计入预览预算。普通推理、摘要及调用入口上的失败尝试共用一次用户请求的调用计数，新提问重新计数；默认适配器不自动重试。摘要请求先检查自身输入是否装得下，压缩后的普通请求再次检查；过大的完整工具轮不强行拆分，无法装下时明确停止。
+
+更换模型时同步填写 `assistant.model.context-window-tokens` 和 `max-output-tokens`，以实际部署的限制为准，不按模型名称自动猜测。`output-token-parameter` 默认 `max-tokens`；要求 `max_completion_tokens` 的 OpenAI 兼容模型改为 `max-completion-tokens`。预算可适配不同窗口，但当前生产连接仍是 OpenAI 兼容接口，不代表已实现 Claude/Gemini 原生协议。
+
+本地统一复用 JTokkit CL100K tokenizer 估算，包括系统提示词、工具定义、摘要、正文、工具参数与结果以及消息开销；这不是各服务商的精确计数。旧 `assistant.limits` 字符预算已移除。
 
 ## HTTP API
 

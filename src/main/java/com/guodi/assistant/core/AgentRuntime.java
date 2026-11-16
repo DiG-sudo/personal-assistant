@@ -7,7 +7,6 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
@@ -23,15 +22,12 @@ public final class AgentRuntime {
     private final ChatModel model;
     private final AssistantHarness harness;
     private final int maxModelCalls;
-    private final int maxContextChars;
     private final int maxToolsPerRound;
 
-    public AgentRuntime(ChatModel model, AssistantHarness harness, int maxModelCalls,
-            int maxContextChars, int maxToolsPerRound) {
+    public AgentRuntime(ChatModel model, AssistantHarness harness, int maxModelCalls, int maxToolsPerRound) {
         this.model = model;
         this.harness = harness;
         this.maxModelCalls = maxModelCalls;
-        this.maxContextChars = maxContextChars;
         this.maxToolsPerRound = maxToolsPerRound;
     }
 
@@ -43,8 +39,9 @@ public final class AgentRuntime {
 
     private void runLoop(AgentExecution execution) {
         Function<Prompt, ChatResponse> modelCall = request -> callModel(execution, request);
-        for (int step = 1; step <= maxModelCalls; step++) {
-            ChatResponse response = harness.aroundReasoning(execution,prompt -> harness.aroundModelCall(execution, prompt, modelCall));
+        while (execution.modelCalls() < maxModelCalls) {
+            ChatResponse response = harness.aroundReasoning(execution,
+                    prompt -> harness.aroundModelCall(execution, prompt, modelCall));
             validateResponse(response);
             AssistantMessage assistant = response.getResult().getOutput();
 
@@ -65,9 +62,6 @@ public final class AgentRuntime {
     }
 
     private ChatResponse callModel(AgentExecution execution, Prompt request) {
-        if (characters(request.getInstructions()) > maxContextChars) {
-            throw new AgentException("本轮上下文超过字符预算，请缩小请求或调整上下文组件。");
-        }
         execution.modelCallStarted(maxModelCalls);
         execution.emit(new ModelStarted(execution.modelCalls()));
         return model.call(request);
@@ -97,12 +91,5 @@ public final class AgentRuntime {
                 throw new AgentException("模型返回了无效或重复的工具调用标识。");
             }
         }
-    }
-
-    private static long characters(List<Message> messages) {
-        return messages.stream().mapToLong(message -> switch (message.getMessageType()) {
-            case SYSTEM -> message.getText().length();
-            default -> TranscriptMessage.from(message).characters();
-        }).sum();
     }
 }
