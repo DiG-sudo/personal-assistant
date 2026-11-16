@@ -16,21 +16,16 @@ import org.springframework.validation.annotation.Validated;
 public record AssistantProperties(
         @NotNull Path dataDirectory,
         @NotNull Resource systemPrompt,
-        @NotNull Memory memory,
         String shellImage,
         @NotNull @Valid Model model,
-        @NotNull @Valid Limits limits,
-        @NotNull @Valid Context context) {
+        @NotNull @Valid Limits limits) {
 
     public enum Provider { DEMO, OPENAI }
-
-    public enum Memory { NOTES, NONE }
 
     public record Model(@DefaultValue("demo") Provider provider, String apiKey, String baseUrl,
             String completionsPath, String name, String reasoningEffort, @Min(1) int timeoutSeconds) {}
 
     public record Limits(@Min(1) int maxModelCalls, @Min(1) int maxContextChars,
-            @Min(1) int maxToolsPerRound, @Min(1) int toolResultChars) {}
+            @Min(1) int maxToolsPerRound) {}
 
-    public record Context(@Min(0) int recentTurns, @Min(0) int historyChars, @Min(0) int memoryChars) {}
 }

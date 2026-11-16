@@ -5,7 +5,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -18,12 +17,13 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 
+import com.guodi.assistant.component.context.ContextView.Entry;
 import com.guodi.assistant.component.context.WindowContextBuilder;
 import com.guodi.assistant.component.context.WindowContextBuilder.ModelContext;
-import com.guodi.assistant.component.memory.NoteMemory;
 import com.guodi.assistant.component.storage.FileConversationStore;
+import com.guodi.assistant.component.storage.FileContextStore;
+import com.guodi.assistant.component.storage.FileContextStore.Checkpoint;
 import com.guodi.assistant.component.tool.ToolOutcome;
 import com.guodi.assistant.component.tool.ToolRegistry;
 import com.guodi.assistant.component.tool.ToolRoundExecutor;
@@ -38,19 +38,21 @@ import com.guodi.assistant.domain.ConversationTurn;
 import com.guodi.assistant.domain.ConversationTurn.Status;
 import com.guodi.assistant.domain.TranscriptMessage;
 
-/** 会话恢复、记忆、上下文、工具执行和持久化；具体循环由 Runtime 传入。 */
+/** 会话恢复、上下文、工具执行和持久化；具体循环由 Runtime 传入。 */
 public class AssistantHarness {
     private static final Logger log = LoggerFactory.getLogger(AssistantHarness.class);
     private final FileConversationStore conversations;
-    private final NoteMemory memory;
+    private final FileContextStore contextStore;
+    private final String systemPrompt;
     private final WindowContextBuilder context;
     private final ToolRegistry toolRegistry;
     private final ToolRoundExecutor toolRounds;
 
-    public AssistantHarness(FileConversationStore conversations, NoteMemory memory,
+    public AssistantHarness(FileConversationStore conversations, FileContextStore contextStore, String systemPrompt,
             WindowContextBuilder context, ToolRegistry toolRegistry, ToolRoundExecutor toolRounds) {
         this.conversations = conversations;
-        this.memory = memory;
+        this.contextStore = contextStore;
+        this.systemPrompt = systemPrompt;
         this.context = context;
         this.toolRegistry = toolRegistry;
         this.toolRounds = toolRounds;
@@ -78,10 +80,8 @@ public class AssistantHarness {
         restoreHistory(execution);
         commit(execution, execution.turn());
 
-        List<String> warnings = new ArrayList<>();
         try {
             execution.emit(new TurnStarted(execution.turn().id()));
-            recallMemory(execution, warnings);
             loop.accept(execution);
             commit(execution, execution.turn().complete());
         } catch (RuntimeException | Error error) {
@@ -89,11 +89,10 @@ public class AssistantHarness {
             throw error;
         }
 
-        observeMemory(execution, warnings);
         ConversationTurn completed = execution.turn();
         log.info("turnId={} stage=run event=complete modelCalls={}", completed.id(), execution.modelCalls());
         Reply reply = new Reply(conversationId, completed.id(), completed.messages().getLast().text(),
-                execution.modelCalls(), List.copyOf(warnings));
+                execution.modelCalls());
         execution.emit(new TurnCompleted(reply));
         return reply;
     }
@@ -109,31 +108,27 @@ public class AssistantHarness {
                 history.set(index, failed);
             }
         }
-        execution.restored(history);
-        log.info("turnId={} stage=restore turns={}", execution.turn().id(), history.size());
-    }
-
-    private void recallMemory(AgentExecution execution, List<String> warnings) {
-        try {
-            execution.recalled(memory.recall(execution.conversationId()));
-            log.info("turnId={} stage=memory.recall count={}", execution.turn().id(), execution.memories().size());
-        } catch (CancellationException cancelled) {
-            throw cancelled;
-        } catch (RuntimeException error) {
-            log.warn("turnId={} stage=memory.recall event=failed", execution.turn().id(), error);
-            warnings.add("记忆读取失败，本轮使用对话记录继续。");
+        Checkpoint checkpoint = contextStore.load(execution.conversationId());
+        var unprocessed = new ArrayList<Entry>();
+        boolean found = checkpoint.sourceTurnId() == null;
+        for (var turn : history) {
+            if (turn.id().equals(checkpoint.sourceTurnId())) {
+                if (checkpoint.sourceMessageCount() < 0 || checkpoint.sourceMessageCount() > turn.messages().size()) {
+                    throw new IllegalStateException("Context checkpoint exceeds the saved transcript");
+                }
+                turn.messages().subList(checkpoint.sourceMessageCount(), turn.messages().size())
+                        .forEach(message -> unprocessed.add(new Entry(turn.id(), message)));
+                found = true;
+            } else if (found) {
+                turn.messages().forEach(message -> unprocessed.add(new Entry(turn.id(), message)));
+            }
         }
-    }
-
-    private void observeMemory(AgentExecution execution, List<String> warnings) {
-        try {
-            memory.observe(execution.conversationId(), execution.turn());
-            log.info("turnId={} stage=memory.observe event=complete", execution.turn().id());
-        } catch (RuntimeException error) {
-            // 回答已经提交，记忆更新失败不回滚回答，也不重跑模型。
-            log.warn("turnId={} stage=memory.observe event=failed", execution.turn().id(), error);
-            warnings.add("回答已保存，但本轮长期记忆更新失败。");
+        if (!found) {
+            throw new IllegalStateException("Context checkpoint refers to a missing transcript turn");
         }
+        execution.restored(checkpoint.view(), unprocessed);
+        log.info("turnId={} stage=restore viewMessages={} appendedMessages={}",
+                execution.turn().id(), checkpoint.view().messages().size(), unprocessed.size() + 1);
     }
 
     public ChatResponse aroundReasoning(AgentExecution execution, Function<Prompt, ChatResponse> reasoning) {
@@ -146,17 +141,18 @@ public class AssistantHarness {
         }
         ModelContext view;
         try {
-            view = context.prepare(execution.history(), execution.memories(), execution.turn().messages());
+            int appended = execution.appendedMessages().size();
+            view = context.prepare(systemPrompt, toolRegistry.callbacks(), execution.view(), execution.appendedMessages(), execution.projectPath());
+            contextStore.save(execution.conversationId(), new Checkpoint(view.view(),
+                    execution.turn().id(), execution.turn().messages().size()));
+            execution.prepared(view.view());
+            log.info("turnId={} stage=context appendedMessages={} viewMessages={}",
+                    execution.turn().id(), appended, view.view().messages().size());
         } catch (RuntimeException | Error error) {
             log.warn("turnId={} stage=context event=failed", execution.turn().id(), error);
             throw error;
         }
-        logContextSelection(execution, view);
-
-        ToolCallingChatOptions options = ToolCallingChatOptions.builder()
-                .toolCallbacks(toolRegistry.callbacks()).internalToolExecutionEnabled(false).build();
-        Prompt prompt = new Prompt(view.messages(), options);
-        return reasoning.apply(prompt);
+        return reasoning.apply(view.prompt());
     }
 
     public ChatResponse aroundModelCall(AgentExecution execution, Prompt request, Function<Prompt, ChatResponse> call) {
@@ -224,19 +220,5 @@ public class AssistantHarness {
         return error instanceof AgentException ? error.getMessage() : "执行失败，详细原因见服务日志。";
     }
 
-    private void logContextSelection(AgentExecution execution, ModelContext view) {
-        try {
-            var selected = view.selection();
-            List<UUID> droppedTurns = execution.history().stream().map(ConversationTurn::id)
-                    .filter(id -> !selected.turnIds().contains(id)).toList();
-            List<Integer> droppedMemories = java.util.stream.IntStream.range(0, execution.memories().size())
-                    .filter(index -> !selected.memoryIndexes().contains(index)).boxed().toList();
-            log.info("turnId={} stage=context selectedTurns={} droppedTurns={} selectedMemories={} droppedMemories={} messages={}",
-                    execution.turn().id(), selected.turnIds(), droppedTurns, selected.memoryIndexes(), droppedMemories, view.messages().size());
-        } catch (RuntimeException ignored) {
-            // 选择证据仅供诊断；它的计算失败不影响模型输入和权威检查点。
-        }
-    }
-
-    public record Reply(String conversationId, UUID turnId, String answer, int modelCalls, List<String> warnings) {}
+    public record Reply(String conversationId, UUID turnId, String answer, int modelCalls) {}
 }

@@ -54,17 +54,19 @@ class ChatApiTest {
     }
 
     @Test
-    void savesNotesRecallsThemAndRestoresTheTranscriptThroughHttp() throws Exception {
+    void persistsAndRestoresConversationThroughHttp() throws Exception {
         http.perform(post("/api/chat").contentType(MediaType.APPLICATION_JSON)
-                .content(request("api-notes", "记住：我喜欢中文回答")))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.warnings").isEmpty());
+                .content(request("api-history", "第一条请求")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.warnings").doesNotExist());
         http.perform(post("/api/chat").contentType(MediaType.APPLICATION_JSON)
-                .content(request("api-notes", "你记得什么")))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.answer").value(containsString("我喜欢中文回答")));
-        http.perform(get("/api/conversations/api-notes")).andExpect(status().isOk())
+                .content(request("api-history", "第二条请求")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.answer").value(containsString("第二条请求")));
+        http.perform(get("/api/conversations/api-history")).andExpect(status().isOk())
                 .andExpect(jsonPath("$.length()").value(2))
                 .andExpect(jsonPath("$[0].status").value("COMPLETED"))
+                .andExpect(jsonPath("$[0].messages[0].text").value("第一条请求"))
                 .andExpect(jsonPath("$[1].messages.length()").value(2));
+        org.assertj.core.api.Assertions.assertThat(data.resolve("data/memory")).doesNotExist();
     }
 
     @Test

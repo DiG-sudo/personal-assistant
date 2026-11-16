@@ -34,6 +34,7 @@ class SandboxShellTest {
         var exists = new AtomicBoolean();
         var running = new AtomicBoolean();
         var commands = new ArrayList<List<String>>();
+        String commandOutput = "输出".repeat(8192) + "\n尾部";
         try (var ignored = mockConstruction(ProcessBuilder.class, (builder, construction) -> {
             @SuppressWarnings("unchecked")
             var arguments = (List<String>) construction.arguments().get(0);
@@ -53,7 +54,7 @@ class SandboxShellTest {
                                 "Destination", "/workspace", "RW", true)),
                         "State", Map.of("Running", running.get()))));
             } else if (arguments.get(1).equals("exec")) {
-                output = "sandbox output";
+                output = commandOutput;
             }
             Process process = mock(Process.class);
             when(builder.redirectErrorStream(true)).thenReturn(builder);
@@ -63,7 +64,7 @@ class SandboxShellTest {
             when(process.waitFor(anyLong(), any(TimeUnit.class))).thenReturn(true);
             when(process.exitValue()).thenReturn(0);
         })) {
-            assertThat(shell.execute("git status", null, 30, context)).isEqualTo("Exit code: 0\nsandbox output");
+            assertThat(shell.execute("git status", null, 30, context)).isEqualTo("Exit code: 0\n" + commandOutput);
             shell.execute("npm test", null, 30, context);
             running.set(false);
             shell.execute("git diff", null, 30, context);

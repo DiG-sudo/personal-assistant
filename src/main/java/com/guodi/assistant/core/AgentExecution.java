@@ -1,9 +1,12 @@
 package com.guodi.assistant.core;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
+import com.guodi.assistant.component.context.ContextView;
+import com.guodi.assistant.component.context.ContextView.Entry;
 import com.guodi.assistant.core.event.AgentEvent;
 import com.guodi.assistant.domain.ConversationTurn;
 
@@ -12,8 +15,8 @@ public final class AgentExecution {
     private final String conversationId;
     private final Path projectPath;
     private ConversationTurn turn;
-    private List<ConversationTurn> history = List.of();
-    private List<String> memories = List.of();
+    private ContextView view = ContextView.empty();
+    private final List<Entry> appendedMessages = new ArrayList<>();
     private int modelCalls;
     private final List<ConversationService.SessionMessage> steers;
     private final Consumer<AgentEvent> events;
@@ -30,14 +33,28 @@ public final class AgentExecution {
     public String conversationId() { return conversationId; }
     public Path projectPath() { return projectPath; }
     public ConversationTurn turn() { return turn; }
-    public List<ConversationTurn> history() { return history; }
-    public List<String> memories() { return memories; }
+    public ContextView view() { return view; }
+    public List<Entry> appendedMessages() { return List.copyOf(appendedMessages); }
     public int modelCalls() { return modelCalls; }
     public List<ConversationService.SessionMessage> steers() { return steers; }
 
-    void restored(List<ConversationTurn> history) { this.history = List.copyOf(history); }
-    void recalled(List<String> memories) { this.memories = List.copyOf(memories); }
-    void committed(ConversationTurn turn) { this.turn = turn; }
+    void restored(ContextView view, List<Entry> unprocessed) {
+        this.view = view;
+        appendedMessages.addAll(unprocessed);
+        turn.messages().forEach(message -> appendedMessages.add(new Entry(turn.id(), message)));
+    }
+
+    void committed(ConversationTurn next) {
+        next.messages().subList(turn.messages().size(), next.messages().size())
+                .forEach(message -> appendedMessages.add(new Entry(next.id(), message)));
+        turn = next;
+    }
+
+    void prepared(ContextView view) {
+        this.view = view;
+        appendedMessages.clear();
+    }
+
     void emit(AgentEvent event) { events.accept(event); }
 
     void modelCallStarted(int limit) {

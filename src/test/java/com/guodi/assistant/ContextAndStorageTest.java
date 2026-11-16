@@ -10,9 +10,13 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.support.ToolCallbacks;
+import com.guodi.assistant.component.storage.FileContextStore;
+import com.guodi.assistant.component.storage.FileContextStore.Checkpoint;
 
-import com.guodi.assistant.component.context.WindowContextBuilder;
-import com.guodi.assistant.component.memory.NoteMemory;
+import com.guodi.assistant.component.context.ContextView;
+import com.guodi.assistant.component.context.ContextView.Entry;
 import com.guodi.assistant.component.storage.FileConversationStore;
 import com.guodi.assistant.component.storage.JsonFiles;
 import com.guodi.assistant.domain.ConversationTurn;
@@ -25,29 +29,37 @@ class ContextAndStorageTest {
     private final JsonFiles files = new JsonFiles(new ObjectMapper().findAndRegisterModules());
 
     @Test
-    void contextSelectsWholeCompletedTurnsWithoutMutatingHistory() {
-        var old = TestSupport.completed("old", "old answer");
-        var withTools = ConversationTurn.start("recent").checkpoint(List.of(
-                TranscriptMessage.from(new UserMessage("recent")),
-                TranscriptMessage.from(AssistantMessage.builder().content("").toolCalls(List.of(
-                        new AssistantMessage.ToolCall("c1", "function", "lookup", "{}"))).build()),
-                TranscriptMessage.from(ToolResponseMessage.builder().responses(List.of(
-                        new ToolResponseMessage.ToolResponse("c1", "lookup", "found"))).build()),
-                TranscriptMessage.from(new AssistantMessage("recent answer")))).complete();
-        var failed = ConversationTurn.start("failed").fail("no");
-        var history = List.of(old, withTools, failed);
-        var prepared = new WindowContextBuilder("system", 1, 2000, 20)
-                .prepare(history, List.of("x".repeat(40), "note"),
-                        List.of(TranscriptMessage.from(new UserMessage("new"))));
-        assertThat(prepared.selection().turnIds()).containsExactly(withTools.id());
-        assertThat(prepared.selection().memoryIndexes()).containsExactly(1);
-        var context = prepared.messages();
-        assertThat(context.stream().map(message -> message.getText())).doesNotContain("old", "failed");
-        assertThat(context.stream().filter(message -> message instanceof ToolResponseMessage).count()).isEqualTo(1);
-        assertThat(context.getLast().getText()).isEqualTo("new");
-        assertThat(history.get(1).messages()).hasSize(4);
-        var small = new WindowContextBuilder("system", 8, 1, 0).prepare(history, List.of(), List.of(TranscriptMessage.from(new UserMessage("new")))).messages();
-        assertThat(small).hasSize(2);
+    void emptyLiveAndRestoredViewsUseTheSameIncrementalAssembly() {
+        var builder = TestSupport.contextBuilder();
+        var tools = List.of(ToolCallbacks.from(new ToolExecutorTest.SampleTool())[0]);
+        var user = TranscriptMessage.from(new UserMessage("request"));
+        var source = ConversationTurn.start("request");
+        var first = builder.prepare("system", tools, ContextView.empty(), List.of(new Entry(source.id(), user)), directory);
+        var intent = TranscriptMessage.from(AssistantMessage.builder().content("").toolCalls(List.of(
+                new AssistantMessage.ToolCall("c1", "function", "sample", "{}"))).build());
+        var result = TranscriptMessage.from(ToolResponseMessage.builder().responses(List.of(
+                new ToolResponseMessage.ToolResponse("c1", "sample", "found"))).build());
+        var second = builder.prepare("system", tools, first.view(), List.of(new Entry(source.id(), intent), new Entry(source.id(), result)), directory);
+        assertThat(first.view().messages()).extracting(Entry::message).containsExactly(user);
+        assertThat(second.view().messages()).extracting(Entry::message).containsExactly(user, intent, result);
+        assertThat(second.prompt().getInstructions()).extracting(message -> message.getMessageType().getValue())
+                .containsExactly("system", "user", "assistant", "tool");
+        assertThat(((ToolCallingChatOptions) second.prompt().getOptions()).getToolCallbacks()).containsExactlyElementsOf(tools);
+        assertThat(((ToolCallingChatOptions) second.prompt().getOptions()).getInternalToolExecutionEnabled()).isFalse();
+
+        var store = new FileContextStore(directory, new ObjectMapper().findAndRegisterModules());
+        store.save("chat", new Checkpoint(second.view(), source.id(), 3));
+        var restored = new FileContextStore(directory, new ObjectMapper().findAndRegisterModules()).load("chat");
+        var next = TranscriptMessage.from(new UserMessage("continue"));
+        var third = builder.prepare("updated system", List.of(), restored.view(), List.of(new Entry(java.util.UUID.randomUUID(), next)), directory);
+        assertThat(third.view().messages()).extracting(Entry::message).containsExactly(user, intent, result, next);
+        assertThat(third.prompt().getInstructions().getFirst().getText()).isEqualTo("updated system");
+        assertThat(third.prompt().getInstructions().stream().filter(message -> message.getMessageType().getValue().equals("system")))
+                .hasSize(1);
+        assertThat(((ToolCallingChatOptions) third.prompt().getOptions()).getToolCallbacks()).isEmpty();
+        assertThat(restored.sourceTurnId()).isEqualTo(source.id());
+        assertThat(restored.sourceMessageCount()).isEqualTo(3);
+        assertThat(store.load("new").view()).isEqualTo(ContextView.empty());
     }
 
     @Test
@@ -75,22 +87,6 @@ class ContextAndStorageTest {
         store.save("../../outside/中文", turn);
         assertThat(store.load("../../outside/中文")).containsExactly(turn);
         assertThat(JsonFiles.conversationDirectory(directory, "../../outside/中文").getParent()).isEqualTo(directory);
-    }
-
-    @Test
-    void notesAreExplicitIdempotentIsolatedAndRespectDisabledMode() {
-        var notes = new NoteMemory(directory.resolve("memory"), files, true);
-        var turn = TestSupport.completed("记住：我喜欢中文回答", "收到");
-        notes.observe("a", turn);
-        notes.observe("a", turn);
-        notes.observe("a", TestSupport.completed("普通聊天", "ok"));
-        assertThat(notes.recall("a")).containsExactly("我喜欢中文回答");
-        assertThat(notes.recall("b")).isEmpty();
-        var disabled = new NoteMemory(directory.resolve("memory"), files, false);
-        assertThat(disabled.recall("a")).isEmpty();
-        disabled.observe("a", TestSupport.completed("记住：不会写入", "收到"));
-        assertThat(new NoteMemory(directory.resolve("memory"), files, true).recall("a"))
-                .containsExactly("我喜欢中文回答");
     }
 
     @Test

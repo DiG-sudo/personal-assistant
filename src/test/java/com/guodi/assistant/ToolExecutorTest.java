@@ -23,7 +23,7 @@ class ToolExecutorTest {
     void registryControlsExposureAndExecution() {
         var callback = ToolCallbacks.from(new SampleTool())[0];
         var registry = TestSupport.toolRegistry(callback);
-        var executor = new ToolExecutor(registry, 1000);
+        var executor = new ToolExecutor(registry);
         assertThat(registry.callbacks()).containsExactly(callback);
 
         var missing = executor.execute(new ToolCall("one", "function", "missing", "{}"), context);
@@ -37,13 +37,27 @@ class ToolExecutorTest {
     }
 
     @Test
-    void duplicateRegistrationFailsEarlyAndToolResultsAreBounded() {
+    void duplicateRegistrationFailsEarly() {
         var callback = ToolCallbacks.from(new SampleTool())[0];
         var binding = new ToolBinding(ToolBinding.Kind.READ, callback);
         assertThatThrownBy(() -> new ToolRegistry(List.of(binding, binding))).hasMessageContaining("Duplicate");
-        var executor = new ToolExecutor(new ToolRegistry(List.of(binding)), 5);
-        var result = executor.execute(new ToolCall("c", "function", "sample", "{}"), context);
-        assertThat(result.responseData()).isEqualTo("\"samp\n[工具结果已截断]");
+    }
+
+    @Test
+    void preservesLargeToolResultsIncludingTheTail() {
+        String content = "结果".repeat(7000) + "TAIL";
+        var callbacks = ToolCallbacks.from(new Object() {
+            @Tool(name = "large", description = "Return a large result")
+            public String large() {
+                return content;
+            }
+        });
+        var executor = new ToolExecutor(TestSupport.toolRegistry(callbacks));
+        var result = executor.execute(new ToolCall("large-call", "function", "large", "{}"), context);
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.toolResponse().id()).isEqualTo("large-call");
+        assertThat(result.responseData()).isEqualTo("\"" + content + "\"");
     }
 
     @Test
@@ -59,7 +73,7 @@ class ToolExecutorTest {
                 throw new CancellationException("stopped");
             }
         });
-        var executor = new ToolExecutor(TestSupport.toolRegistry(callbacks), 1000);
+        var executor = new ToolExecutor(TestSupport.toolRegistry(callbacks));
 
         var failure = executor.execute(new ToolCall("a", "function", "reject", "{}"), context);
         assertThat(failure.success()).isFalse();

@@ -69,6 +69,64 @@ class OpenAiModelAdapterTest {
     }
 
     @Test
+    void summaryUsesTheConfiguredRealAdapterAndStoresAJsonObject() throws Exception {
+        var requests = new ArrayList<JsonNode>();
+        var server = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/custom/chat", exchange -> {
+            requests.add(json.readTree(exchange.getRequestBody()));
+            var message = json.createObjectNode().put("role", "assistant")
+                    .put("content", TestSupport.summaryJson("current JSON goal"));
+            var choice = json.createObjectNode().put("index", 0).put("finish_reason", "stop");
+            choice.set("message", message);
+            var body = json.createObjectNode().put("id", "summary-fixture").put("object", "chat.completion")
+                    .put("created", 1).put("model", "fixture-model");
+            body.putArray("choices").add(choice);
+            byte[] response = json.writeValueAsBytes(body);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        try {
+            runner(server).run(context -> {
+                assertThat(context).hasNotFailed();
+                var previous = TestSupport.completed("older question", "older answer");
+                var current = ConversationTurn.start("current question");
+                var entries = new ArrayList<com.guodi.assistant.component.context.ContextView.Entry>();
+                previous.messages().forEach(message -> entries.add(
+                        new com.guodi.assistant.component.context.ContextView.Entry(previous.id(), message)));
+                entries.add(new com.guodi.assistant.component.context.ContextView.Entry(current.id(), current.messages().getFirst()));
+                var view = new com.guodi.assistant.component.context.ContextView(TestSupport.summary("old goal"), entries);
+                var compacted = context.getBean(com.guodi.assistant.component.context.WindowContextBuilder.class).compact(view, 0);
+                assertThat(compacted.summary().goal()).isEqualTo("current JSON goal");
+                assertThat(compacted.messages()).hasSize(1);
+                assertThat(requests).hasSize(1);
+                var request = requests.getFirst();
+                assertThat(request.path("model").asText()).isEqualTo("fixture-model");
+                assertThat(request.path("tools").size()).isZero();
+                assertThat(request.get("messages").get(0).path("content").asText()).contains("JSON object", "criticalContext");
+                try {
+                    var payload = json.readTree(request.get("messages").get(1).path("content").asText());
+                    assertThat(payload.path("previousSummary").path("goal").asText()).isEqualTo("old goal");
+                    assertThat(payload.get("olderMessages")).hasSize(2);
+                    assertThat(payload.toString()).doesNotContain("current question");
+                    var store = context.getBean(com.guodi.assistant.component.storage.FileContextStore.class);
+                    store.save("summary", new com.guodi.assistant.component.storage.FileContextStore.Checkpoint(compacted, current.id(), 1));
+                    var saved = com.guodi.assistant.component.storage.JsonFiles.conversationDirectory(
+                            directory.resolve("data/contexts"), "summary").resolve("view.json");
+                    assertThat(json.readTree(Files.readAllBytes(saved)).path("view").path("summary").isObject()).isTrue();
+                    assertThat(store.load("summary").view()).isEqualTo(compacted);
+                } catch (java.io.IOException error) {
+                    throw new AssertionError(error);
+                }
+            });
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void providerFailureIsNotAutomaticallyRetriedAndTheTurnIsSavedAsFailed() throws Exception {
         var attempts = new AtomicInteger();
         var server = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
@@ -108,7 +166,6 @@ class OpenAiModelAdapterTest {
                         "assistant.model.provider=openai",
                         "assistant.model.api-key=local-fixture-only", "assistant.model.name=fixture-model",
                         "assistant.model.base-url=http://127.0.0.1:" + server.getAddress().getPort(),
-                        "assistant.model.completions-path=/custom/chat",
-                        "assistant.memory=none");
+                        "assistant.model.completions-path=/custom/chat");
     }
 }

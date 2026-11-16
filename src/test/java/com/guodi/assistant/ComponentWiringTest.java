@@ -25,8 +25,8 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 
 import com.guodi.assistant.component.context.WindowContextBuilder;
-import com.guodi.assistant.component.memory.NoteMemory;
 import com.guodi.assistant.component.storage.FileConversationStore;
+import com.guodi.assistant.component.storage.ToolResultStore;
 import com.guodi.assistant.component.tool.ToolBinding;
 import com.guodi.assistant.component.tool.ToolBinding.Kind;
 import com.guodi.assistant.component.tool.ToolExecutor;
@@ -47,10 +47,9 @@ class ComponentWiringTest {
     }
 
     @Test
-    void registeredToolsAreAvailableWithMemoryDisabled() {
-        runner().withUserConfiguration(ExtraTool.class).withPropertyValues("assistant.memory=none").run(context -> {
-            assertThat(context).hasNotFailed().hasSingleBean(NoteMemory.class);
-            assertThat(context.getBean(NoteMemory.class).recall("demo")).isEmpty();
+    void registeredToolsAreAvailable() {
+        runner().withUserConfiguration(ExtraTool.class).run(context -> {
+            assertThat(context).hasNotFailed();
             assertThat(context.getBean(ToolRegistry.class).callbacks())
                     .extracting(tool -> tool.getToolDefinition().name())
                     .containsExactly("edit_file", "execute", "glob_files", "grep_files", "list_files",
@@ -61,7 +60,7 @@ class ComponentWiringTest {
     @Test
     void userBeansReplaceDefaultComponents() {
         runner().withUserConfiguration(CustomComponents.class).run(context -> {
-            assertThat(context).hasNotFailed().hasSingleBean(ChatModel.class).hasSingleBean(NoteMemory.class)
+            assertThat(context).hasNotFailed().hasSingleBean(ChatModel.class)
                     .hasSingleBean(FileConversationStore.class).hasSingleBean(WindowContextBuilder.class).hasSingleBean(ToolRegistry.class);
             var reply = context.getBean(ConversationService.class).send("custom", TestSupport.message("hello"));
             assertThat(reply.answer()).isEqualTo("custom answer");
@@ -70,7 +69,6 @@ class ComponentWiringTest {
                     context.getBean(ChatModel.class), context.getBean(ToolRegistry.class)).components())
                     .containsEntry("mode", "live");
             assertThat(context.getBean(FileConversationStore.class).load("custom")).hasSize(1);
-            assertThat(context.getBean(NoteMemory.class)).isSameAs(context.getBean("customMemory"));
         });
     }
 
@@ -193,6 +191,45 @@ class ComponentWiringTest {
     }
 
     @Test
+    void normalSendAutomaticallyCompactsSavesAndReusesTheView() {
+        var summaryCalls = new AtomicInteger();
+        var answerCalls = new AtomicInteger();
+        runner().withPropertyValues("assistant.limits.max-context-chars=1500")
+                .withBean(ChatModel.class, () -> prompt -> {
+                    if (prompt.getInstructions().getFirst().getText().contains("handoff summary")) {
+                        summaryCalls.incrementAndGet();
+                        assertThat(prompt.getContents()).contains("older question", "older answer")
+                                .doesNotContain("recent question", "continue");
+                        return TestSupport.text(TestSupport.summaryJson("older progress"));
+                    }
+                    answerCalls.incrementAndGet();
+                    assertThat(prompt.getContents()).contains("older progress", "recent question", "recent answer")
+                            .doesNotContain("older question", "older answer");
+                    return TestSupport.text("done");
+                }).run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var transcript = context.getBean(FileConversationStore.class);
+                    var older = TestSupport.completed("older question " + "x".repeat(1800), "older answer");
+                    var recent = TestSupport.completed("recent question", "recent answer");
+                    transcript.save("auto", older);
+                    transcript.save("auto", recent);
+                    var service = context.getBean(ConversationService.class);
+                    assertThat(service.send("auto", TestSupport.message("continue")).answer()).isEqualTo("done");
+                    var views = context.getBean(com.guodi.assistant.component.storage.FileContextStore.class);
+                    var checkpoint = views.load("auto");
+                    assertThat(checkpoint.view().summary().goal()).isEqualTo("older progress");
+                    assertThat(checkpoint.view().messages()).extracting(entry -> entry.message().text())
+                            .containsExactly("recent question", "recent answer", "continue");
+                    assertThat(service.send("auto", TestSupport.message("next")).answer()).isEqualTo("done");
+                    assertThat(summaryCalls).hasValue(1);
+                    assertThat(answerCalls).hasValue(2);
+                    assertThat(transcript.load("auto").getFirst()).isEqualTo(older);
+                    assertThat(views.load("auto").view().messages()).extracting(entry -> entry.message().text())
+                            .contains("done", "next");
+                });
+    }
+
+    @Test
     void builtInToolsRequireAnExplicitShellImage() {
         runner().withPropertyValues(
                 "assistant.data-directory=" + directory.resolve("data"),
@@ -226,11 +263,8 @@ class ComponentWiringTest {
         @Bean FileConversationStore customStore(AssistantProperties properties) {
             return TestSupport.store(properties.dataDirectory().resolve("custom"));
         }
-        @Bean NoteMemory customMemory(AssistantProperties properties) {
-            return TestSupport.disabledMemory(properties.dataDirectory().resolve("custom-memory"));
-        }
-        @Bean WindowContextBuilder customContext() {
-            return new WindowContextBuilder("custom system prompt", 0, 0, 0);
+        @Bean WindowContextBuilder customContext(ChatModel model, ObjectMapper json) {
+            return new WindowContextBuilder(new ToolResultStore(), null, model, json, 64000);
         }
         @Bean
         ToolRegistry customTools() {

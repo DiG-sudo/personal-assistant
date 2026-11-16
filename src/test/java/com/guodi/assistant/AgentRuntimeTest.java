@@ -19,7 +19,6 @@ import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.annotation.Tool;
 
-import com.guodi.assistant.component.context.WindowContextBuilder;
 import com.guodi.assistant.component.tool.ToolRegistry;
 import com.guodi.assistant.core.AgentException;
 import com.guodi.assistant.core.AgentExecution;
@@ -123,8 +122,8 @@ class AgentRuntimeTest {
         var actualCalls = new AtomicInteger();
         var execution = new AtomicReference<AgentExecution>();
         var boundaries = new ArrayList<String>();
-        var harness = new AssistantHarness(TestSupport.store(directory), TestSupport.disabledMemory(directory),
-                new WindowContextBuilder("system", 0, 0, 0),
+        var harness = new AssistantHarness(TestSupport.store(directory), TestSupport.contextStore(directory), "system",
+                TestSupport.contextBuilder(),
                 tools, TestSupport.toolRounds(tools)) {
             @Override
             public ChatResponse aroundReasoning(AgentExecution run, Function<Prompt, ChatResponse> reasoning) {
@@ -165,8 +164,8 @@ class AgentRuntimeTest {
             if (call == 3) assertThat(prompt.getInstructions().getLast().getText()).isEqualTo(second.text());
             return TestSupport.text("answer-" + call);
         };
-        var harness = new AssistantHarness(stored, TestSupport.disabledMemory(directory),
-                new WindowContextBuilder("system", 0, 0, 0),
+        var harness = new AssistantHarness(stored, TestSupport.contextStore(directory), "system",
+                TestSupport.contextBuilder(),
                 tools, TestSupport.toolRounds(tools)) {
             @Override
             public ChatResponse aroundModelCall(AgentExecution run, Prompt request, Function<Prompt, ChatResponse> call) {
@@ -206,8 +205,8 @@ class AgentRuntimeTest {
                     .isInstanceOf(ToolResponseMessage.class);
             return TestSupport.text("done");
         };
-        var harness = new AssistantHarness(stored, TestSupport.disabledMemory(directory),
-                new WindowContextBuilder("system", 0, 0, 0),
+        var harness = new AssistantHarness(stored, TestSupport.contextStore(directory), "system",
+                TestSupport.contextBuilder(),
                 tools, TestSupport.toolRounds(tools)) {
             @Override
             public ChatResponse aroundModelCall(AgentExecution run, Prompt request, Function<Prompt, ChatResponse> call) {
@@ -231,8 +230,8 @@ class AgentRuntimeTest {
     void steerDoesNotResetTheModelCallBudget() {
         var stored = TestSupport.store(directory);
         var calls = new AtomicInteger();
-        var harness = new AssistantHarness(stored, TestSupport.disabledMemory(directory),
-                new WindowContextBuilder("system", 0, 0, 0),
+        var harness = new AssistantHarness(stored, TestSupport.contextStore(directory), "system",
+                TestSupport.contextBuilder(),
                 tools, TestSupport.toolRounds(tools)) {
             @Override
             public ChatResponse aroundModelCall(AgentExecution run, Prompt request, Function<Prompt, ChatResponse> call) {
@@ -270,8 +269,8 @@ class AgentRuntimeTest {
             }
             return invocation.callRealMethod();
         }).when(failing).save(anyString(), any(ConversationTurn.class));
-        var harness = new AssistantHarness(failing, TestSupport.disabledMemory(directory),
-                new WindowContextBuilder("system", 0, 0, 0),
+        var harness = new AssistantHarness(failing, TestSupport.contextStore(directory), "system",
+                TestSupport.contextBuilder(),
                 tools, TestSupport.toolRounds(tools)) {
             @Override
             public ChatResponse aroundModelCall(AgentExecution run, Prompt request, Function<Prompt, ChatResponse> call) {
@@ -309,8 +308,8 @@ class AgentRuntimeTest {
             }
             return invocation.callRealMethod();
         }).when(journal).save(anyString(), any(ConversationTurn.class));
-        var harness = new AssistantHarness(journal, TestSupport.disabledMemory(directory),
-                new WindowContextBuilder("system", 0, 0, 0),
+        var harness = new AssistantHarness(journal, TestSupport.contextStore(directory), "system",
+                TestSupport.contextBuilder(),
                 tools, TestSupport.toolRounds(tools));
         return TestSupport.conversations(directory, new AgentRuntime(model, harness, maxCalls, maxChars, maxTools));
     }

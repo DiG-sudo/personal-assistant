@@ -6,6 +6,8 @@
 package com.guodi.assistant.component.tool;
 
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PushbackReader;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
@@ -102,29 +104,78 @@ public final class WorkspaceFiles {
         }
     }
 
-    @Tool(name = "read_file", description = "Read a UTF-8 file up to 1 MiB with line numbers."
-            + " Supports pagination via offset and limit. Output may be truncated.")
+    @Tool(name = "read_file", description = "Read a UTF-8 file with line numbers, including large files."
+            + " Supports line pagination via offset/limit and long-line continuation via char_offset."
+            + " Each page is bounded; follow the returned continuation coordinates when present.")
     public String readFile(
             @ToolParam(description = "File path relative to the project root, e.g., src/App.java. Absolute paths, '..', and symlinks are not allowed") String path,
-            @ToolParam(description = "Start line (0-indexed). Default: 0 (from beginning)", required = false) Integer offset,
-            @ToolParam(description = "Max lines to return. Default: 0 (all lines)", required = false) Integer limit, ToolContext context)
-            throws IOException {
+            @ToolParam(description = "Start line (0-indexed). Default: 0", required = false) Integer offset,
+            @ToolParam(description = "Max lines to return. Default: 0 (until end or page boundary)", required = false) Integer limit,
+            @ToolParam(description = "Unicode characters to skip within the start line. Default: 0; use returned continuation value for long lines", required = false) Integer char_offset,
+            ToolContext context) throws IOException {
         Path root = root(context);
         int start = offset == null ? 0 : offset;
         int count = limit == null ? 0 : limit;
-        if (start < 0 || count < 0) {
-            throw new IllegalArgumentException("offset and limit must be non-negative");
+        int column = char_offset == null ? 0 : char_offset;
+        if (start < 0 || count < 0 || column < 0) {
+            throw new IllegalArgumentException("offset, limit and char_offset must be non-negative");
         }
-        String content = readText(resolve(root, path));
-        var lines = content.lines().skip(start).iterator();
+        Path target = resolve(root, path);
+        if (!isFile(target)) throw new IllegalArgumentException("Expected a regular file: " + path);
         StringBuilder result = new StringBuilder();
-        for (int read = 0; lines.hasNext() && (count == 0 || read < count); read++) {
-            if (read > 0) {
-                result.append('\n');
+        int line = 0, character = 0, printedLine = -1;
+        try (var reader = new PushbackReader(new InputStreamReader(Files.newInputStream(target, READ, NOFOLLOW_LINKS),
+                StandardCharsets.UTF_8.newDecoder()), 2)) {
+            for (int value; (value = readCharacter(reader)) != -1;) {
+                if (Thread.currentThread().isInterrupted()) throw new CancellationException("File read interrupted");
+                if (line < start || (line == start && character < column)) {
+                    if (value == '\n') {
+                        if (line == start && character < column) throw new IllegalArgumentException("char_offset exceeds the start line");
+                        line++;
+                        character = 0;
+                    } else {
+                        character++;
+                    }
+                    continue;
+                }
+                if (count > 0 && (long) line >= (long) start + count) break;
+                String prefix = printedLine == line ? "" : (result.isEmpty() ? "" : "\n") + (line + 1) + ": ";
+                int length = value == '\n' ? 0 : Character.charCount(value);
+                // A read page has its own IO bound; this is not context head/tail truncation.
+                if (result.length() + prefix.length() + length > MAX_FILE_BYTES) {
+                    result.append("\n[Continue with read_file: offset=").append(line)
+                            .append(", char_offset=").append(character).append(", limit=")
+                            .append(count == 0 ? 0 : Math.max(1, (long) start + count - line)).append(']');
+                    break;
+                }
+                result.append(prefix);
+                printedLine = line;
+                if (value == '\n') {
+                    line++;
+                    character = 0;
+                } else {
+                    result.appendCodePoint(value);
+                    character++;
+                }
             }
-            result.append(start + read + 1).append(": ").append(lines.next());
         }
         return result.toString();
+    }
+
+    /** Normalize CRLF/CR and keep Unicode code points intact across page boundaries. */
+    private static int readCharacter(PushbackReader reader) throws IOException {
+        int first = reader.read();
+        if (first == '\r') {
+            int next = reader.read();
+            if (next != '\n' && next != -1) reader.unread(next);
+            return '\n';
+        }
+        if (first != -1 && Character.isHighSurrogate((char) first)) {
+            int next = reader.read();
+            if (next != -1 && Character.isLowSurrogate((char) next)) return Character.toCodePoint((char) first, (char) next);
+            if (next != -1) reader.unread(next);
+        }
+        return first;
     }
 
     @Tool(name = "glob_files", description = "Find files matching a glob pattern. Returns at most 200 files by default to keep tool output bounded.")

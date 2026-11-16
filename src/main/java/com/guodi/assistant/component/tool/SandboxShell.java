@@ -6,7 +6,6 @@
 package com.guodi.assistant.component.tool;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,7 +29,6 @@ import org.springframework.ai.tool.annotation.ToolParam;
 public final class SandboxShell {
     private static final Logger log = LoggerFactory.getLogger(SandboxShell.class);
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final int MAX_OUTPUT_BYTES = 32 * 1024;
     private static final int DOCKER_TIMEOUT_SECONDS = 30;
     private static final int CREATE_TIMEOUT_SECONDS = 300;
     private static final String PROJECT_LABEL = "personal-assistant.project-path";
@@ -151,11 +149,7 @@ public final class SandboxShell {
         Process process = new ProcessBuilder(arguments).redirectErrorStream(true).start();
         var output = new FutureTask<>(() -> {
             try (var input = process.getInputStream()) {
-                byte[] prefix = input.readNBytes(MAX_OUTPUT_BYTES + 1);
-                input.transferTo(OutputStream.nullOutputStream());
-                int size = Math.min(prefix.length, MAX_OUTPUT_BYTES);
-                String text = new String(prefix, 0, size, StandardCharsets.UTF_8);
-                return prefix.length > size ? text + "\n(output was truncated)" : text;
+                return new String(input.readAllBytes(), StandardCharsets.UTF_8);
             }
         });
         Thread.ofVirtual().start(output);

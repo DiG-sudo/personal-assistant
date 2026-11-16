@@ -114,7 +114,7 @@ public final class ConversationService {
         private final String conversationId;
         private final ConcurrentHashMap<UUID, SessionMessage> waiting = new ConcurrentHashMap<>();
         private final ReentrantLock executionLock = new ReentrantLock(true);
-        private volatile ActiveTurn activeTurn;
+        private volatile SteerBuffer steerBuffer;
 
         Session(String conversationId) {
             this.conversationId = conversationId;
@@ -130,21 +130,21 @@ public final class ConversationService {
                 }
                 ConversationInfo info = bindProject(conversationId, claimed);
                 // Each turn owns its buffer. A late write cannot become another turn's input.
-                ActiveTurn active = new ActiveTurn(claimed.projectPath(), new CopyOnWriteArrayList<>());
-                activeTurn = active;
+                SteerBuffer active = new SteerBuffer(claimed.projectPath(), new CopyOnWriteArrayList<>());
+                steerBuffer = active;
                 try {
                     return runtime.chat(conversationId, claimed.text(), claimed.projectPath(), active.steers(), events);
                 } finally {
                     touch(info);
                 }
             } finally {
-                activeTurn = null;
+                steerBuffer = null;
                 executionLock.unlock();
             }
         }
 
         boolean steer(UUID messageId) {
-            ActiveTurn active = activeTurn;
+            SteerBuffer active = steerBuffer;
             if (active == null) {
                 return false;
             }
@@ -157,7 +157,7 @@ public final class ConversationService {
             return true;
         }
 
-        private record ActiveTurn(Path projectPath, List<SessionMessage> steers) {}
+        private record SteerBuffer(Path projectPath, List<SessionMessage> steers) {}
     }
 
     public static final class ProjectPathMismatchException extends RuntimeException {

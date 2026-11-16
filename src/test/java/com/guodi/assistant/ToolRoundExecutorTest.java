@@ -51,7 +51,7 @@ class ToolRoundExecutorTest {
             return result;
         });
 
-        var executor = new ToolRoundExecutor(registry, new ToolExecutor(registry, 1000), workers);
+        var executor = new ToolRoundExecutor(registry, new ToolExecutor(registry), workers);
         var outcomes = executor.executeRound(List.of(
                 call("1", "read", "{\"label\":\"A\"}"), call("2", "read", "{\"label\":\"B\"}"),
                 call("3", "write", "{}"), call("4", "read", "{\"label\":\"C\"}"),

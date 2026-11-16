@@ -27,9 +27,10 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
 
 import com.guodi.assistant.component.context.WindowContextBuilder;
-import com.guodi.assistant.component.memory.NoteMemory;
 import com.guodi.assistant.component.model.DelayedDemoChatModel;
 import com.guodi.assistant.component.storage.FileConversationStore;
+import com.guodi.assistant.component.storage.FileContextStore;
+import com.guodi.assistant.component.storage.ToolResultStore;
 import com.guodi.assistant.component.storage.JsonFiles;
 import com.guodi.assistant.component.storage.FileSessionStore;
 import com.guodi.assistant.component.tool.ToolBinding;
@@ -86,17 +87,22 @@ public class AssistantAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    NoteMemory noteMemory(AssistantProperties properties, ObjectMapper json) {
-        boolean enabled = properties.memory() == AssistantProperties.Memory.NOTES;
-        return new NoteMemory(properties.dataDirectory().resolve("memory"), new JsonFiles(json), enabled);
+    WindowContextBuilder contextBuilder(ToolResultStore results, ChatModel model, ObjectMapper json,
+            AssistantProperties properties) {
+        // Reuse the existing character limit until token budgeting is unified.
+        return new WindowContextBuilder(results, null, model, json, properties.limits().maxContextChars());
     }
 
     @Bean
     @ConditionalOnMissingBean
-    WindowContextBuilder contextBuilder(AssistantProperties properties) throws IOException {
-        String prompt = properties.systemPrompt().getContentAsString(StandardCharsets.UTF_8);
-        var context = properties.context();
-        return new WindowContextBuilder(prompt, context.recentTurns(), context.historyChars(), context.memoryChars());
+    ToolResultStore toolResultStore() {
+        return new ToolResultStore();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    FileContextStore contextStore(AssistantProperties properties, ObjectMapper json) {
+        return new FileContextStore(properties.dataDirectory().resolve("contexts"), json);
     }
 
     @Bean
@@ -113,8 +119,8 @@ public class AssistantAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    ToolExecutor toolExecutor(ToolRegistry registry, AssistantProperties properties) {
-        return new ToolExecutor(registry, properties.limits().toolResultChars());
+    ToolExecutor toolExecutor(ToolRegistry registry) {
+        return new ToolExecutor(registry);
     }
 
     @Bean
@@ -131,9 +137,11 @@ public class AssistantAutoConfiguration {
     }
 
     @Bean
-    AssistantHarness assistantHarness(FileConversationStore conversations, NoteMemory memory,
-            WindowContextBuilder context, ToolRegistry toolRegistry, ToolRoundExecutor toolRounds) {
-        return new AssistantHarness(conversations, memory, context, toolRegistry, toolRounds);
+    AssistantHarness assistantHarness(FileConversationStore conversations, FileContextStore contextStore,
+            WindowContextBuilder context, ToolRegistry toolRegistry, ToolRoundExecutor toolRounds,
+            AssistantProperties properties) throws IOException {
+        String prompt = properties.systemPrompt().getContentAsString(StandardCharsets.UTF_8);
+        return new AssistantHarness(conversations, contextStore, prompt, context, toolRegistry, toolRounds);
     }
 
     @Bean

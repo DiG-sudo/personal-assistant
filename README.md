@@ -1,10 +1,10 @@
 # Personal Assistant
 
-Java 21 + Spring Boot + Spring AI 的个人助手。固定 ReAct / Harness 主链路，模型、工具、记忆、上下文与存储通过组件插入。
+Java 21 + Spring Boot + Spring AI 的个人助手。固定 ReAct / Harness 主链路，模型、工具、上下文与存储通过组件插入。
 
 陪伴助手的人格、记忆、行为设计与开发记录见 [开发总览](companion-agent/README.md)，当前优先推进 [人格设计](companion-agent/personality/README.md)。
 
-上下文组织的核心准则见 [agent.md](agent.md)；具体组成逐步确定后再按准则组织。
+上下文组织的核心准则见 [AGENTS.md](AGENTS.md)；具体组成逐步确定后再按准则组织。
 
 ## 启动
 
@@ -18,7 +18,7 @@ mvn spring-boot:run
 
 后端默认监听 http://127.0.0.1:18081，通过 `personal-agent-cli` 或下方 HTTP API 连接。当前 YAML 配置为真实模型模式，需要设置 API Key；不依赖 MySQL 或 Redis。
 
-可尝试“你好”，或先发送“记住：我喜欢中文回答”，再询问“你记得什么”。
+可尝试“你好”，或让模型读取当前项目的 README。
 
 演示模型用于检查调用链，不具备真实大模型的自由对话能力。
 
@@ -46,7 +46,6 @@ flowchart TD
     X --> T
     X --> F[工具回调]
     B --> G[FileConversationStore]
-    B --> H[NoteMemory]
     B --> I[WindowContextBuilder]
     I --> C
 ```
@@ -56,17 +55,17 @@ flowchart TD
 | `core/ConversationService` | 每会话阻塞串行、等待输入与 steer |
 | `core/AgentRuntime` | 模型与工具循环、实际请求预算、工具意图检查点顺序 |
 | `core/AssistantHarness` | aroundRun / aroundReasoning / aroundModelCall / aroundToolRound、恢复与持久化 |
-| `core/AgentExecution` | 每轮的已提交游标、历史/记忆快照和实际请求计数 |
-| `component/` | 工具执行器、文件存储、上下文和记忆组件 |
+| `core/AgentExecution` | 每轮的已提交记录、上下文视图、待追加消息和实际请求计数 |
+| `component/` | 工具执行器、文件存储、上下文组件 |
 | `extension/`（按需创建） | 自定义组件与工具 Bean |
 | `config/` | 启动装配和配置校验 |
 | `resources/prompts/assistant/v1.txt` | 默认系统提示词 |
 
 Harness 直接调用 `component/` 里的组件。Spring 在启动时装配它们，同类型的用户 Bean 优先。
 
-每次模型推理前重新调用上下文组件，临时模型视图不修改已保存记录。调用方向为 Controller → ConversationService → Runtime.chat → Harness.aroundRun → Runtime.runLoop；Harness 接收循环的方法引用，不反向依赖 Runtime。每个会话使用公平锁，由请求线程执行自己的消息并等待工具结果。连续的只读工具可在共享线程池并行。
+每次模型推理前，上下文组件统一接收系统提示词、工具定义、已有视图和新增消息，保存更新后的派生视图，原始轮次记录保持独立。调用方向为 Controller → ConversationService → Runtime.chat → Harness.aroundRun → Runtime.runLoop；Harness 接收循环的方法引用，不反向依赖 Runtime。每个会话使用公平锁，由请求线程执行自己的消息并等待工具结果。连续的只读工具可在共享线程池并行。
 
-排查问题先按 turnId 查阶段日志：memory.recall → context → model → persistence → tools → memory.observe。职责表和错误处理见 [架构](docs/ARCHITECTURE.md)。日志不保存完整模型输入，也不替代恢复检查点。
+排查问题先按 turnId 查阶段日志：restore → persistence → context → model → persistence → tools。职责表和错误处理见 [架构](docs/ARCHITECTURE.md)。日志不保存完整模型输入，也不替代恢复检查点。
 
 开发示例见 [组件开发指南](docs/COMPONENTS.md)。
 
@@ -106,19 +105,12 @@ mvn spring-boot:run
 | `AI_API_KEY` | 无，真实模型模式必填 |
 | `ASSISTANT_PORT` | `18081` |
 | `ASSISTANT_DATA_DIR` | `./data`，相对于启动目录 |
-| `ASSISTANT_MEMORY` | `notes`，可选 `none` |
 | `ASSISTANT_SYSTEM_PROMPT` | `classpath:prompts/assistant/v1.txt` |
 | `ASSISTANT_SHELL_IMAGE` | `ubuntu:24.04`，本地缺少时自动拉取 |
 
-默认备注记忆只保存以“记住：”或“记住:”开头的消息，按 conversationId 隔离。新对话不读取其他会话备注。关闭长期记忆不删除聊天记录：
+`data/sessions/` 保存会话 ID、项目路径、标题和创建/活动时间，`data/conversations/` 保存原始聊天和工具检查点，`data/contexts/` 保存派生视图及原始消息处理位置。数据目录已加入 Git 忽略规则。独立备注记忆已移除；旧的 `data/memory/` 文件保留在磁盘上，程序不再读取或写入。
 
-```bash
-ASSISTANT_MEMORY=none mvn spring-boot:run
-```
-
-`data/sessions/` 保存会话 ID、项目路径、标题和创建/活动时间，`data/conversations/` 保存聊天和工具检查点，`data/memory/` 保存显式备注。数据目录已加入 Git 忽略规则。替换记忆实现时，旧数据格式不会自动迁移。
-
-默认上下文最多选择最近 8 个完整成功轮次，历史 24000 字符、记忆 4000 字符。运行消息总上限 64000 字符，每轮最多 12 次模型调用。字符数属于近似预算，未计入服务商协议和工具定义开销。
+上下文复用已保存视图，只追加尚未处理的消息，不再按成功状态或固定轮数丢弃历史。系统提示词和工具定义每次传入并由 Builder 组装。运行消息总上限仍为 64000 字符，普通推理请求每轮上限 12 次；prepare 超限时会实际调用现有 ChatModel 生成 JSON 摘要，保存压缩视图后继续推理。大结果落盘/预览流程已接入，其阈值仍留空。额外摘要请求的统一计数与 token 预算后续处理。字符数属于近似预算，未计入服务商协议和工具定义开销。
 
 ## HTTP API
 
@@ -133,7 +125,7 @@ curl http://127.0.0.1:18081/api/conversations/my-chat
 curl http://127.0.0.1:18081/api/components
 ```
 
-聊天请求的 `projectPath` 必须是后端可访问的现有项目绝对目录。第一条开始执行的消息会持久化会话与项目的绑定；后续请求必须使用相同的真实路径，否则返回 HTTP 409，不进入 Agent 执行。同一执行轮次不接受其他项目的消息作为 steer。普通聊天返回 `conversationId、turnId、answer、modelCalls、warnings`。客户端为每条输入生成 messageId，可在执行期间继续发送。
+聊天请求的 `projectPath` 必须是后端可访问的现有项目绝对目录。第一条开始执行的消息会持久化会话与项目的绑定；后续请求必须使用相同的真实路径，否则返回 HTTP 409，不进入 Agent 执行。同一执行轮次不接受其他项目的消息作为 steer。普通聊天返回 `conversationId、turnId、answer、modelCalls`。客户端为每条输入生成 messageId，可在执行期间继续发送。
 
 会话恢复使用三个查询接口：
 
@@ -157,13 +149,13 @@ curl -N http://127.0.0.1:18081/api/chat/stream \
 
 `POST /api/steer` 接收 `{conversationId,messageId}`，仅把已登记且未执行的普通消息转为当前任务补充。成功返回 STEERED；不能提升时返回 409。被提升的原聊天请求返回 202 STEERED，不再单独执行。客户端通过该接口将等待消息转为当前任务的补充。
 
-Harness 在推理前逐条保存补充，最终文本返回前还会检查剩余补充。补充采用尽力处理语义，极晚到达可能未生效，不自动带入下一轮。记忆故障不会回滚已保存的回答。
+Harness 在推理前逐条保存补充，最终文本返回前还会检查剩余补充。补充采用尽力处理语义，极晚到达可能未生效，不自动带入下一轮。
 
 ## 恢复与边界
 
 - 单轮状态为 `RUNNING → COMPLETED / FAILED`。
 - 工具意图保存成功后才执行；重启后的未完成轮次保留为失败记录，不自动重放。
-- 成功轮次恢复完整工具配对；上下文裁剪不删除原始记录。
+- 恢复派生视图并补齐未处理的原始消息；缺少结果的工具意图在视图中标记结果未知，不自动重放，也不修改原始记录。
 - 新记录使用 `schemaVersion=3`，历史格式 `1` 和 `2` 仍可读取。
 - 当前为单进程、同一会话串行、本地原子文件替换；两个进程不能共用数据目录。
 - 默认仅监听 127.0.0.1。身份授权、SSE、跨会话记忆、后台任务和动态热加载尚未实现。

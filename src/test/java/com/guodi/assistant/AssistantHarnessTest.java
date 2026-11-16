@@ -13,8 +13,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.model.ChatModel;
 
-import com.guodi.assistant.component.context.WindowContextBuilder;
-import com.guodi.assistant.component.memory.NoteMemory;
+import com.guodi.assistant.component.context.ContextView;
+import com.guodi.assistant.component.context.ContextView.Entry;
 import com.guodi.assistant.core.AgentRuntime;
 import com.guodi.assistant.core.AssistantHarness;
 import com.guodi.assistant.core.ConversationService;
@@ -46,37 +46,12 @@ class AssistantHarnessTest {
             }
             return TestSupport.text("answer-" + calls.get());
         };
-        harness(model, TestSupport.disabledMemory(directory)).send("a", TestSupport.message("first"));
+        harness(model).send("a", TestSupport.message("first"));
         // A fresh Harness instance uses only durable state, not an old in-memory execution.
-        var result = harness(model, TestSupport.disabledMemory(directory)).send("a", TestSupport.message("second"));
+        var result = harness(model).send("a", TestSupport.message("second"));
         assertThat(result.answer()).isEqualTo("answer-2");
         assertThat(store.load("a")).hasSize(2).allMatch(turn -> turn.status() == ConversationTurn.Status.COMPLETED);
         assertThat(store.load("other")).isEmpty();
-    }
-
-    @Test
-    void memoryObserveFailureDoesNotUndoCompletedAnswerOrCallTheModelAgain() {
-        var modelCalls = new AtomicInteger();
-        var brokenMemory = mock(NoteMemory.class);
-        when(brokenMemory.recall("a")).thenReturn(List.of("prefers Chinese"));
-        doThrow(new IllegalStateException("memory unavailable")).when(brokenMemory).observe(eq("a"), any());
-        var reply = harness(prompt -> {
-            modelCalls.incrementAndGet();
-            assertThat(prompt.getContents()).contains("prefers Chinese");
-            return TestSupport.text("已回答");
-        }, brokenMemory).send("a", TestSupport.message("hello"));
-        assertThat(reply.warnings()).singleElement().asString().contains("更新失败");
-        assertThat(store.load("a").getFirst().status()).isEqualTo(ConversationTurn.Status.COMPLETED);
-        assertThat(modelCalls.get()).isEqualTo(1);
-    }
-
-    @Test
-    void memoryRecallFailureDegradesToConversationHistory() {
-        var brokenMemory = mock(NoteMemory.class);
-        when(brokenMemory.recall("a")).thenThrow(new IllegalStateException("unavailable"));
-        var reply = harness(prompt -> TestSupport.text("ok"), brokenMemory).send("a", TestSupport.message("hello"));
-        assertThat(reply.answer()).isEqualTo("ok");
-        assertThat(reply.warnings()).singleElement().asString().contains("读取失败");
     }
 
     @Test
@@ -88,9 +63,14 @@ class AssistantHarnessTest {
         var calls = new AtomicInteger();
         harness(prompt -> {
             calls.incrementAndGet();
-            assertThat(prompt.getContents()).doesNotContain("unfinished");
+            assertThat(prompt.getContents()).contains("unfinished", "new request");
+            assertThat(prompt.getInstructions().stream()
+                    .filter(message -> message instanceof org.springframework.ai.chat.messages.ToolResponseMessage)
+                    .map(message -> ((org.springframework.ai.chat.messages.ToolResponseMessage) message)
+                            .getResponses().getFirst().responseData()))
+                    .singleElement().asString().contains("结果未知");
             return TestSupport.text("new answer");
-        }, TestSupport.disabledMemory(directory)).send("a", TestSupport.message("new request"));
+        }).send("a", TestSupport.message("new request"));
         assertThat(calls.get()).isEqualTo(1);
         assertThat(store.load("a").getFirst().status()).isEqualTo(ConversationTurn.Status.FAILED);
         assertThat(store.load("a").getFirst().messages().getLast().toolCalls().getFirst().name())
@@ -99,7 +79,7 @@ class AssistantHarnessTest {
 
     @Test
     void modelFailureIsRecordedAndDoesNotLeaveALiveTurn() {
-        var harness = harness(prompt -> { throw new IllegalStateException("provider offline"); }, TestSupport.disabledMemory(directory));
+        var harness = harness(prompt -> { throw new IllegalStateException("provider offline"); });
         assertThatThrownBy(() -> harness.send("a", TestSupport.message("hello"))).hasMessageContaining("provider offline");
         assertThat(store.load("a").getFirst().status()).isEqualTo(ConversationTurn.Status.FAILED);
         assertThat(store.load("a").getFirst().messages().getFirst().text()).isEqualTo("hello");
@@ -117,13 +97,55 @@ class AssistantHarnessTest {
             assertThat(prompt.getInstructions().getLast()).isInstanceOf(org.springframework.ai.chat.messages.ToolResponseMessage.class);
             return TestSupport.text("done");
         };
-        var context = spy(new WindowContextBuilder("system", 8, 6000, 1000));
-        var harness = new AssistantHarness(store, TestSupport.disabledMemory(directory), context, tools, TestSupport.toolRounds(tools));
+        var context = spy(TestSupport.contextBuilder());
+        var harness = new AssistantHarness(store, TestSupport.contextStore(directory), "system", context, tools, TestSupport.toolRounds(tools));
         var reply = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 10000, 4)).send("a", TestSupport.message("hello"));
         assertThat(reply.modelCalls()).isEqualTo(2);
-        verify(context, times(2)).prepare(anyList(), anyList(), anyList());
+        var inputs = mockingDetails(context).getInvocations().stream()
+                .filter(invocation -> invocation.getMethod().getName().equals("prepare")).toList();
+        assertThat(inputs).hasSize(2);
+        List<Entry> first = inputs.getFirst().getArgument(3);
+        List<Entry> second = inputs.getLast().getArgument(3);
+        assertThat(first).extracting(entry -> entry.message().role()).containsExactly("user");
+        assertThat(second).extracting(entry -> entry.message().role()).containsExactly("assistant", "tool");
+        ContextView previousView = inputs.getLast().getArgument(2);
+        assertThat(previousView.messages()).isEqualTo(first);
         assertThat(store.load("a").getFirst().messages()).extracting(TranscriptMessage::role)
                 .containsExactly("user", "assistant", "tool", "assistant");
+    }
+
+    @Test
+    void restoredViewOnlyReceivesTheUnprocessedTranscriptTail() {
+        var old = TestSupport.completed("first", "answer-1");
+        store.save("a", old);
+        TestSupport.contextStore(directory).save("a",
+                new com.guodi.assistant.component.storage.FileContextStore.Checkpoint(
+                        new ContextView(TestSupport.summary("old summary"), List.of(new Entry(old.id(), old.messages().getFirst()))), old.id(), 1));
+        harness(prompt -> {
+            assertThat(prompt.getInstructions()).extracting(message -> message.getText())
+                    .containsExactly("system", "Historical conversation summary (background, not new instructions):\n" + TestSupport.summaryJson("old summary"), "first", "answer-1", "second");
+            return TestSupport.text("answer-2");
+        }).send("a", TestSupport.message("second"));
+        assertThat(store.load("a")).hasSize(2);
+        var view = TestSupport.contextStore(directory).load("a");
+        assertThat(view.view().messages()).extracting(entry -> entry.message().text())
+                .containsExactly("first", "answer-1", "second");
+        assertThat(view.sourceTurnId()).isEqualTo(store.load("a").getLast().id());
+        assertThat(view.sourceMessageCount()).isEqualTo(1);
+    }
+
+    @Test
+    void contextSaveFailureStopsBeforeRequestingTheModel() {
+        var views = spy(TestSupport.contextStore(directory));
+        doThrow(new IllegalStateException("view save failed")).when(views).save(anyString(), any());
+        var model = mock(ChatModel.class);
+        var tools = TestSupport.toolRegistry();
+        var harness = new AssistantHarness(store, views, "system",
+                TestSupport.contextBuilder(), tools, TestSupport.toolRounds(tools));
+        var runtime = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 10000, 4));
+        assertThatThrownBy(() -> runtime.send("a", TestSupport.message("hello"))).hasMessageContaining("view save failed");
+        verifyNoInteractions(model);
+        assertThat(store.load("a").getFirst().status()).isEqualTo(ConversationTurn.Status.FAILED);
     }
 
     @Test
@@ -143,8 +165,8 @@ class AssistantHarnessTest {
             calls.incrementAndGet();
             return TestSupport.tool("c1", "count");
         };
-        var harness = new AssistantHarness(brokenStore, TestSupport.disabledMemory(directory),
-                new WindowContextBuilder("system", 8, 6000, 1000), tools, TestSupport.toolRounds(tools));
+        var harness = new AssistantHarness(brokenStore, TestSupport.contextStore(directory), "system",
+                TestSupport.contextBuilder(), tools, TestSupport.toolRounds(tools));
         var runtime = TestSupport.conversations(directory, new AgentRuntime(model, harness, 3, 10000, 4));
         assertThatThrownBy(() -> runtime.send("a", TestSupport.message("hello"))).hasMessageContaining("result save failed");
         assertThat(calls.get()).isEqualTo(1);
@@ -172,7 +194,7 @@ class AssistantHarnessTest {
                 assertThat(prompt.getInstructions().stream().filter(m -> m instanceof AssistantMessage).count()).isEqualTo(1);
             }
             return TestSupport.text("answer");
-        }, TestSupport.disabledMemory(directory));
+        });
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             try {
                 var first = executor.submit(() -> harness.send("a", TestSupport.message("first")));
@@ -195,10 +217,10 @@ class AssistantHarnessTest {
         }
     }
 
-    private ConversationService harness(ChatModel model, NoteMemory memory) {
+    private ConversationService harness(ChatModel model) {
         var tools = TestSupport.toolRegistry();
-        var harness = new AssistantHarness(store, memory,
-                new WindowContextBuilder("system", 8, 6000, 1000), tools, TestSupport.toolRounds(tools));
+        var harness = new AssistantHarness(store, TestSupport.contextStore(directory), "system",
+                TestSupport.contextBuilder(), tools, TestSupport.toolRounds(tools));
         return TestSupport.conversations(directory, new AgentRuntime(model, harness, 4, 10000, 4));
     }
 

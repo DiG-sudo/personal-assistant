@@ -6,8 +6,6 @@ import java.util.List;
 
 // 导入 AssistantMessage：模型的助手响应消息。
 import org.springframework.ai.chat.messages.AssistantMessage;
-// 导入 UserMessage：模型的用户或数据消息。
-import org.springframework.ai.chat.messages.UserMessage;
 // 导入 ChatModel：Spring AI 的模型调用接口。
 import org.springframework.ai.chat.model.ChatModel;
 // 导入 ChatResponse：Spring AI 的模型响应容器。
@@ -25,17 +23,6 @@ public class DemoChatModel implements ChatModel {
     // 接收 Harness 构造的 Prompt，根据最新一条输入生成演示响应。
     public ChatResponse call(Prompt prompt) {
         String user = prompt.getInstructions().getLast().getText();
-        if (user.contains("记忆") || user.contains("记得")) {
-            // 从完整 Prompt 中查找 Harness/上下文组件提供的记忆数据消息。
-            String memory = prompt.getInstructions().stream().filter(message -> message instanceof UserMessage
-                    // 只选正文以前面约定的记忆数据前缀开头的 user 消息，不把普通历史当作召回记忆。
-                    && message.getText().startsWith("以下是检索到的历史记忆数据"))
-                    // 取匹配消息的文本；findFirst 只取第一条，找不到时返回默认说明。
-                    .map(message -> message.getText()).findFirst().orElse("没有加载到长期记忆。");
-            // 把召回的记忆数据作为普通文本回答返回。
-            return text("演示模式 · " + memory);
-        }
-        // 未命中记忆规则时，回复本地演示的固定确认文本。
         return text("演示模式：已收到「" + user + "」。这是本地确定性演示模型；配置真实模型后即可自由聊天。");
     }
 

@@ -18,7 +18,7 @@ import com.guodi.assistant.core.event.AgentEvent;
 import com.guodi.assistant.core.event.ModelStarted;
 import com.guodi.assistant.domain.TranscriptMessage;
 
-/** Fixed model/tool loop. Knows nothing about files, memory strategies, HTTP or business tools. */
+/** Fixed model/tool loop. Knows nothing about files, context strategies, HTTP or business tools. */
 public final class AgentRuntime {
     private final ChatModel model;
     private final AssistantHarness harness;

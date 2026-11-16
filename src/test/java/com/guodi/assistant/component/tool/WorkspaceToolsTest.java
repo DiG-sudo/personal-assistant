@@ -24,12 +24,35 @@ class WorkspaceToolsTest {
         tools.writeFile("src/Other.java", "axb", context);
 
         assertThat(tools.listFiles(".", context)).contains("[FILE] Main.java", "[DIR]  src");
-        assertThat(tools.readFile("Main.java", 1, 1, context)).isEqualTo("2: a.b");
+        assertThat(tools.readFile("Main.java", 1, 1, null, context)).isEqualTo("2: a.b");
         assertThat(tools.globFiles("**/*.java", null, 10, context)).contains("Main.java", "src/Other.java");
         assertThat(tools.grepFiles("a.b", null, "*.java", 1, context)).isEqualTo("Main.java:2:a.b");
         assertThatThrownBy(() -> tools.editFile("Main.java", "a.b", "x", false, context)).hasMessageContaining("ambiguous");
         assertThat(tools.editFile("Main.java", "a.b", "x", true, context)).contains("2 replacement(s)");
         assertThat(Files.readString(project.resolve("Main.java"))).isEqualTo("one\r\nx\r\nx\r\n");
+    }
+
+    @Test
+    void readsLargeFilesAndContinuesLongUnicodeLinesWithoutDroppingCharacters() throws Exception {
+        Path project = Files.createDirectory(directory.resolve("project"));
+        var tools = new WorkspaceFiles(directory.resolve("data"));
+        var context = new ToolContext(Map.of("projectPath", project));
+        String line = "中😀".repeat(400000);
+        Files.writeString(project.resolve("huge.txt"), "first\r\n" + line + "\r\nlast\n");
+        assertThat(tools.readFile("huge.txt", 2, 1, null, context)).isEqualTo("3: last");
+        String first = tools.readFile("huge.txt", 1, 1, null, context);
+        var continuation = java.util.regex.Pattern.compile("\\[Continue with read_file: offset=(\\d+), char_offset=(\\d+), limit=(\\d+)\\]")
+                .matcher(first);
+        assertThat(continuation.find()).isTrue();
+        int position = Integer.parseInt(continuation.group(2));
+        String second = tools.readFile("huge.txt", Integer.parseInt(continuation.group(1)),
+                Integer.parseInt(continuation.group(3)), position, context);
+        String prefix = first.substring("2: ".length(), first.lastIndexOf("\n[Continue"));
+        assertThat(prefix + second.substring("2: ".length())).isEqualTo(line);
+        assertThat(prefix.codePointCount(0, prefix.length())).isEqualTo(position);
+        assertThatThrownBy(() -> tools.readFile("huge.txt", 0, 1, -1, context)).hasMessageContaining("non-negative");
+        // The existing edit/write size limit is independent of paginated reading.
+        assertThatThrownBy(() -> tools.editFile("huge.txt", "first", "changed", false, context)).hasMessageContaining("1 MiB");
     }
 
     @Test
@@ -43,8 +66,8 @@ class WorkspaceToolsTest {
         var tools = new WorkspaceFiles(directory.resolve("data"));
         var context = new ToolContext(Map.of("projectPath", project));
 
-        assertThatThrownBy(() -> tools.readFile(secret.toString(), null, null, context)).hasMessageContaining("relative");
-        assertThatThrownBy(() -> tools.readFile("escape/secret.txt", null, null, context)).hasMessageContaining("Symbolic");
+        assertThatThrownBy(() -> tools.readFile(secret.toString(), null, null, null, context)).hasMessageContaining("relative");
+        assertThatThrownBy(() -> tools.readFile("escape/secret.txt", null, null, null, context)).hasMessageContaining("Symbolic");
         assertThatThrownBy(() -> tools.writeFile("escape/new.txt", "changed", context)).hasMessageContaining("Symbolic");
         assertThatThrownBy(() -> tools.writeFile("dangling", "changed", context)).hasMessageContaining("Symbolic");
         assertThatThrownBy(() -> tools.writeFile("../outside/new.txt", "changed", context)).hasMessageContaining("traversal");
@@ -70,8 +93,8 @@ class WorkspaceToolsTest {
         tools.writeFile("README.md", "first", firstContext);
         tools.writeFile("README.md", "second", secondContext);
 
-        assertThat(tools.readFile("README.md", null, null, firstContext)).isEqualTo("1: first");
-        assertThat(tools.readFile("README.md", null, null, secondContext)).isEqualTo("1: second");
+        assertThat(tools.readFile("README.md", null, null, null, firstContext)).isEqualTo("1: first");
+        assertThat(tools.readFile("README.md", null, null, null, secondContext)).isEqualTo("1: second");
         assertThat(ToolCallbacks.from(tools)).allSatisfy(callback ->
                 assertThat(callback.getToolDefinition().inputSchema()).doesNotContain("projectPath", "context"));
     }
@@ -82,9 +105,9 @@ class WorkspaceToolsTest {
         var shell = new SandboxShell(new WorkspaceFiles(directory.resolve("data")), "local-test-image");
         var context = new ToolContext(Map.of("projectPath", project));
         var definition = ToolCallbacks.from(shell)[0].getToolDefinition();
-        assertThat(definition.description()).contains("in a sandbox", "without docker exec or docker run prefixes",
+        assertThat(definition.description()).contains("in a Linux sandbox", "without docker exec or docker run prefixes",
                 "{\"command\":\"git status\"}", "{\"command\":\"npm test\"}");
-        assertThat(definition.inputSchema()).contains("Timeout in seconds (default: 30)")
+        assertThat(definition.inputSchema()).contains("Timeout in seconds: 1-120 (default: 30)")
                 .doesNotContain("projectPath", "context");
         String name = SandboxShell.containerName(project);
         assertThat(SandboxShell.containerName(project)).isEqualTo(name);

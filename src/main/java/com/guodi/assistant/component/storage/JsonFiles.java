@@ -22,7 +22,7 @@ import java.util.List;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 /** Local single-process JSON storage. A checkpoint replaces a complete file via atomic rename. */
-// 通用 JSON 文件读写工具；不理解聊天或记忆规则，只负责对象与文件的转换。
+// 通用 JSON 文件读写工具；不理解对话业务规则，只负责对象与文件的转换。
 public final class JsonFiles {
     // Jackson 的 JSON 编解码器；Spring 配置好模块后通过构造器传入。
     private final ObjectMapper json;
@@ -43,7 +43,7 @@ public final class JsonFiles {
         return root.resolve(name);
     }
 
-    // <T> 是泛型类型；传入 Class<T>，使同一个读目录方法既能读取 ConversationTurn，也能读取 Note。
+    // <T> 是泛型类型；传入 Class<T>，使同一个读目录方法可以读取不同的持久化记录。
     public <T> List<T> readDirectory(Path directory, Class<T> type) {
         // 第一次访问时可能还没有目录，先检查是否存在。
         if (!Files.exists(directory)) {

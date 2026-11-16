@@ -39,8 +39,8 @@ public class GreetingConfiguration {
 | --- | --- |
 | Spring AI `ChatModel` | 发起模型请求，保留工具调用 ID |
 | `FileConversationStore` | 加载历史，按 turn ID 原子保存 |
-| `NoteMemory` | 按会话保存显式备注，`assistant.memory=none` 关闭读取和写入 |
-| `WindowContextBuilder` | 每次推理前组织系统提示、记忆、历史和本轮消息 |
+| `WindowContextBuilder` | 统一处理系统提示词、工具定义、已有视图和新增消息，返回更新视图与 Prompt |
+| `FileContextStore` | 原子保存派生视图及原始消息处理位置 |
 | `ToolRegistry` | 按名称登记全部工具 Bean，向模型提供定义 |
 | `ToolRoundExecutor` | 分批调度并保留模型给出的调用顺序 |
 | `ToolExecutor` | 执行单个回调并返回成功状态与正文 |
@@ -50,10 +50,17 @@ public class GreetingConfiguration {
 ## 调整执行策略的位置
 
 - 聊天执行入口：ConversationService.send 负责会话串行，再调用 Runtime.chat(conversationId, message, steers)；Runtime 将 this::runLoop 交给 Harness.aroundRun，保留原有生命周期方向。历史查询由 Controller 直接调用 Harness.history。
-- 一轮恢复、提交和记忆时机：AssistantHarness.aroundRun；executeTurn 直接调用 restoreHistory、recallMemory、observeMemory 等方法。
-- 每步上下文构造：aroundReasoning 先应用并提交一条待处理 steer，保存成功后移除，再调用 WindowContextBuilder.prepare 并构造 Prompt。
+- 一轮恢复和提交时机：AssistantHarness.aroundRun；executeTurn 调用 restoreHistory 并提交状态。
+- 每步上下文构造：aroundReasoning 先应用并提交一条待处理 steer，保存成功后移除，再调用 WindowContextBuilder.prepare(systemPrompt, toolDefinitions, view, appendedMessages, projectPath)，保存视图及处理位置后使用其 Prompt。
 - 真实模型请求的包装：aroundModelCall；真实调用函数接受 Prompt，Runtime 在调用前检查最终请求和计数。当前没有自动重试。
 - 工具组执行和结果检查点：aroundToolRound；工具表由 ToolRegistry 维护，调度由 ToolRoundExecutor 负责，单工具结果由 ToolExecutor 生成。
 - 权威检查点：Harness.checkpoint / commit。工具意图成功保存后才执行，禁止包装层自动重放不确定的外部副作用。
 
-不要在策略组件中重新保存对话或维护另一份消息列表。新增资源由相应执行边界负责 finally 清理。
+策略组件不归档原始轮次；派生视图由 FileContextStore 保存，完整原始记录继续由 FileConversationStore 保存。新增资源由相应执行边界负责 finally 清理。
+
+### 上下文视图与结果文件（2026-11-16）
+
+- ContextView 是六字段 JSON 摘要对象和带 turnId 的保留消息；不复制完整 ConversationTurn。摘要及近期消息一次保存到现有 view.json，原始消息处理游标保持独立。
+- WindowContextBuilder 统一处理新增结果、视图合并和显式 compact；ToolResultStore 只写项目 .agent/tool-results/ 并返回相对路径。
+- prepare 的 projectPath 只定位项目结果目录，不属于模型上下文。已有视图不会重新处理大结果。
+- 预算留空：生产 resultPreviewChars=null；compact 已复用现有 ChatModel，prepare 在超过现有 max-context-chars 时实际调用压缩；统一计数留待后续处理。
