@@ -6,6 +6,10 @@ assistant:
   data-directory: ${ASSISTANT_DATA_DIR:./data}
   system-prompt: ${ASSISTANT_SYSTEM_PROMPT:classpath:prompts/assistant/v1.txt}
   shell-image: ${ASSISTANT_SHELL_IMAGE:ubuntu:24.04}
+  control:
+    heartbeat-interval-seconds: 5
+    heartbeat-request-timeout-seconds: 3
+    heartbeat-timeout-seconds: 30
   budget:
     window-tokens: 262144
     compact-ratio: 0.8

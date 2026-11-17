@@ -22,6 +22,14 @@ mvn spring-boot:run
 
 演示模型用于检查调用链，不具备真实大模型的自由对话能力。
 
+## CLI 心跳与取消
+
+CLI 持续读取输入，聊天请求在后台执行。`/cancel` 取消后端收到命令时正在执行的任务；没有任务时忽略。Ctrl+C、Ctrl+D 和 `/exit` 退出窗口，不发送任务取消请求。
+
+CLI 启动时调用 `POST /api/control/open`，再定期调用 `/api/control/heartbeat`；`/api/control/cancel` 提交主动取消，三个接口均接收 `{"conversationId":"..."}`。心跳参数统一配置于 `assistant.control`，注册响应返回参数。默认每 5 秒发送心跳，请求超时 3 秒，30 秒未收到心跳视为窗口失联；过期控制对象不再续期，需重新打开会话。
+
+Runtime 在每次循环开头、组织上下文前检查。当前模型调用和工具批次完成、结果保存后才停止；如果已获得最终回答则允许正常完成。Harness 沿用原有 FAILED/COMPLETED 收尾；原始记录保留，未消费 steer 丢弃。取消后继续保留窗口与心跳，收尾清除取消标记，允许继续输入。
+
 ## 注册工具
 
 在 Spring 中注册带执行类型的 `ToolBinding` Bean，默认注册表会接入全部 `ToolBinding` Bean。访问 `GET /api/components` 可以查看注册的工具和模型模式。

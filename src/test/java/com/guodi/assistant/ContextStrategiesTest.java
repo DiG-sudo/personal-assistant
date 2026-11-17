@@ -222,7 +222,7 @@ class ContextStrategiesTest {
         var builder = new WindowContextBuilder(new ToolResultStore(), json, TestSupport.budget(10000));
         var harness = new AssistantHarness(transcript, views, "system", builder, tools, TestSupport.toolRounds(tools));
         assertThatThrownBy(() -> new AgentRuntime(model, harness, 3, 4)
-                .chat("auto", "continue", directory, List.of(), event -> {}))
+                .chat("auto", "continue", directory, List.of(), TestSupport.control(), event -> {}))
                 .hasMessageContaining("invalid structured JSON");
         assertThat(calls).hasValue(1);
         assertThat(views.load("auto")).isEqualTo(before);
@@ -248,7 +248,7 @@ class ContextStrategiesTest {
         var harness = new AssistantHarness(transcript, views, "system", builder, tools, TestSupport.toolRounds(tools));
         var events = new java.util.ArrayList<com.guodi.assistant.core.event.AgentEvent>();
         assertThatThrownBy(() -> new AgentRuntime(model, harness, 1, 4)
-                .chat("shared", "continue", directory, List.of(), events::add)).hasMessageContaining("预算");
+                .chat("shared", "continue", directory, List.of(), TestSupport.control(), events::add)).hasMessageContaining("预算");
         assertThat(calls).hasValue(1);
         assertThat(events.stream().filter(event -> event instanceof com.guodi.assistant.core.event.ModelStarted).toList())
                 .containsExactly(new com.guodi.assistant.core.event.ModelStarted(1));
@@ -359,7 +359,7 @@ class ContextStrategiesTest {
             assertThat(result).contains(".agent/tool-results/").hasSizeLessThan(1000);
             return TestSupport.text("done");
         };
-        new AgentRuntime(model, harness, 3, 4).chat("a", "test", project, List.of(), event -> {});
+        new AgentRuntime(model, harness, 3, 4).chat("a", "test", project, List.of(), TestSupport.control(), event -> {});
         var saved = transcript.load("a").getFirst();
         assertThat(saved.status()).isEqualTo(ConversationTurn.Status.COMPLETED);
         assertThat(saved.messages().get(2).toolResponses().getFirst().responseData()).isEqualTo(json.writeValueAsString(original.content));
@@ -379,7 +379,7 @@ class ContextStrategiesTest {
         var calls = new AtomicInteger();
         ChatModel model = prompt -> { calls.incrementAndGet(); return TestSupport.tool("c1", "large"); };
         assertThatThrownBy(() -> new AgentRuntime(model, harness, 3, 4)
-                .chat("a", "test", project, List.of(), event -> {})).isInstanceOf(java.io.UncheckedIOException.class);
+                .chat("a", "test", project, List.of(), TestSupport.control(), event -> {})).isInstanceOf(java.io.UncheckedIOException.class);
         assertThat(calls).hasValue(1);
         var saved = transcript.load("a").getFirst();
         assertThat(saved.status()).isEqualTo(ConversationTurn.Status.FAILED);

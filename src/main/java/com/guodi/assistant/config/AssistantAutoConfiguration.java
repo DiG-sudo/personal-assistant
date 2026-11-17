@@ -162,7 +162,7 @@ public class AssistantAutoConfiguration {
 
     @Bean
     ConversationService conversationService(AgentRuntime runtime, FileSessionStore sessions,
-            FileConversationStore transcripts) {
-        return new ConversationService(runtime, sessions, transcripts);
+            FileConversationStore transcripts, AssistantProperties properties) {
+        return new ConversationService(runtime, sessions, transcripts, properties.control());
     }
 }

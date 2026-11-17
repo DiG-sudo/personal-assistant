@@ -2,6 +2,7 @@ package com.guodi.assistant.core;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Optional;
@@ -18,6 +19,7 @@ import org.slf4j.LoggerFactory;
 import com.guodi.assistant.component.storage.FileConversationStore;
 import com.guodi.assistant.component.storage.FileSessionStore;
 import com.guodi.assistant.domain.ConversationInfo;
+import com.guodi.assistant.config.AssistantProperties.Control;
 import com.guodi.assistant.core.AssistantHarness.Reply;
 import com.guodi.assistant.core.event.AgentEvent;
 
@@ -28,11 +30,14 @@ public final class ConversationService {
     private final FileConversationStore transcripts;
     private final ConcurrentHashMap<String, Session> sessions = new ConcurrentHashMap<>();
     private final AgentRuntime runtime;
+    private final Control controlSettings;
 
-    public ConversationService(AgentRuntime runtime, FileSessionStore sessionStore, FileConversationStore transcripts) {
+    public ConversationService(AgentRuntime runtime, FileSessionStore sessionStore, FileConversationStore transcripts,
+            Control controlSettings) {
         this.runtime = runtime;
         this.sessionStore = sessionStore;
         this.transcripts = transcripts;
+        this.controlSettings = controlSettings;
     }
 
     public List<ConversationInfo> list() {
@@ -106,6 +111,21 @@ public final class ConversationService {
         return session != null && session.steer(messageId);
     }
 
+    public Control openControl(String conversationId) {
+        session(conversationId).openControl();
+        return controlSettings;
+    }
+
+    public boolean heartbeat(String conversationId) {
+        Session session = sessions.get(conversationId);
+        return session != null && session.heartbeat();
+    }
+
+    public boolean cancel(String conversationId) {
+        Session session = sessions.get(conversationId);
+        return session != null && session.cancel();
+    }
+
     private Session session(String conversationId) {
         return sessions.computeIfAbsent(conversationId, id -> new Session(id));
     }
@@ -115,12 +135,37 @@ public final class ConversationService {
         private final ConcurrentHashMap<UUID, SessionMessage> waiting = new ConcurrentHashMap<>();
         private final ReentrantLock executionLock = new ReentrantLock(true);
         private volatile SteerBuffer steerBuffer;
+        private RequestControl control;
 
         Session(String conversationId) {
             this.conversationId = conversationId;
         }
 
+        synchronized void openControl() {
+            control = newControl();
+        }
+
+        private RequestControl newControl() {
+            return new RequestControl(Duration.ofSeconds(controlSettings.heartbeatTimeoutSeconds()));
+        }
+
+        private synchronized RequestControl controlForRequest() {
+            // Preserve direct HTTP callers; an expired existing control requires explicit reopening.
+            if (control == null) control = newControl();
+            return control;
+        }
+
+        synchronized boolean heartbeat() {
+            return control != null && control.heartbeat();
+        }
+
+        boolean cancel() {
+            SteerBuffer active = steerBuffer;
+            return active != null && active.control().requestCancel();
+        }
+
         Reply submit(SessionMessage message, Consumer<AgentEvent> events) {
+            RequestControl requestControl = controlForRequest();
             waiting.put(message.messageId(), message);
             executionLock.lock();
             try {
@@ -128,16 +173,18 @@ public final class ConversationService {
                 if (claimed == null) {
                     return null;
                 }
+                requestControl.executionStarted();
                 ConversationInfo info = bindProject(conversationId, claimed);
                 // Each turn owns its buffer. A late write cannot become another turn's input.
-                SteerBuffer active = new SteerBuffer(claimed.projectPath(), new CopyOnWriteArrayList<>());
+                SteerBuffer active = new SteerBuffer(claimed.projectPath(), new CopyOnWriteArrayList<>(), requestControl);
                 steerBuffer = active;
                 try {
-                    return runtime.chat(conversationId, claimed.text(), claimed.projectPath(), active.steers(), events);
+                    return runtime.chat(conversationId, claimed.text(), claimed.projectPath(), active.steers(), requestControl, events);
                 } finally {
                     touch(info);
                 }
             } finally {
+                requestControl.executionFinished();
                 steerBuffer = null;
                 executionLock.unlock();
             }
@@ -157,7 +204,7 @@ public final class ConversationService {
             return true;
         }
 
-        private record SteerBuffer(Path projectPath, List<SessionMessage> steers) {}
+        private record SteerBuffer(Path projectPath, List<SessionMessage> steers, RequestControl control) {}
     }
 
     public static final class ProjectPathMismatchException extends RuntimeException {

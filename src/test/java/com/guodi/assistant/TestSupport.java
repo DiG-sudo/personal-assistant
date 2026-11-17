@@ -65,6 +65,14 @@ final class TestSupport {
         }
     }
 
+    static com.guodi.assistant.config.AssistantProperties.Control controlSettings() {
+        return new com.guodi.assistant.config.AssistantProperties.Control(5, 3, 30);
+    }
+
+    static com.guodi.assistant.core.RequestControl control() {
+        return new com.guodi.assistant.core.RequestControl(java.time.Duration.ofSeconds(30));
+    }
+
     static Budget budget(int windowTokens) {
         return new Budget(windowTokens, 0.8, 0.15, Math.min(128, windowTokens / 4),
                 Math.min(256, windowTokens / 4), 8192, 4096, 100, 8);
@@ -112,6 +120,6 @@ final class TestSupport {
             com.guodi.assistant.core.AgentRuntime runtime) {
         var sessions = new com.guodi.assistant.component.storage.FileSessionStore(directory.resolve("sessions"),
                 new JsonFiles(new ObjectMapper().findAndRegisterModules()));
-        return new com.guodi.assistant.core.ConversationService(runtime, sessions, store(directory));
+        return new com.guodi.assistant.core.ConversationService(runtime, sessions, store(directory), controlSettings());
     }
 }

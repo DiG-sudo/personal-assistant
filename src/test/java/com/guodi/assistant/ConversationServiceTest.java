@@ -36,13 +36,13 @@ class ConversationServiceTest {
     void freshServiceKeepsProjectBindingAndTitleAndRejectsAnotherProjectBeforeRuntime() {
         AgentRuntime runtime = mock(AgentRuntime.class);
         Path project = directory.resolve("project");
-        var first = new ConversationService(runtime, sessions(), transcripts());
+        var first = new ConversationService(runtime, sessions(), transcripts(), TestSupport.controlSettings());
         first.send("chat", TestSupport.message("修复登录\n接口", project));
         ConversationInfo saved = first.info("chat").orElseThrow();
         assertThat(saved.title()).isEqualTo("修复登录 接口");
         assertThat(saved.projectPath()).isEqualTo(project.toString());
 
-        var resumed = new ConversationService(runtime, sessions(), transcripts());
+        var resumed = new ConversationService(runtime, sessions(), transcripts(), TestSupport.controlSettings());
         clearInvocations(runtime);
         assertThat(resumed.info("chat")).contains(saved);
         assertThatThrownBy(() -> resumed.send("chat", TestSupport.message("改代码", directory.resolve("other"))))
@@ -53,7 +53,7 @@ class ConversationServiceTest {
         resumed.send("chat", TestSupport.message("继续", project));
         assertThat(resumed.info("chat").orElseThrow().title()).isEqualTo(saved.title());
         assertThat(resumed.info("chat").orElseThrow().createdAt()).isEqualTo(saved.createdAt());
-        verify(runtime).chat(eq("chat"), eq("继续"), eq(project), anyList(), any());
+        verify(runtime).chat(eq("chat"), eq("继续"), eq(project), anyList(), any(), any());
     }
 
     @Test
@@ -65,7 +65,7 @@ class ConversationServiceTest {
                 ConversationTurn.Status.RUNNING, ConversationTurn.start("旧会话").messages(), null);
         transcripts().save("legacy", old);
         var runtime = mock(AgentRuntime.class);
-        var service = new ConversationService(runtime, sessions(), transcripts());
+        var service = new ConversationService(runtime, sessions(), transcripts(), TestSupport.controlSettings());
 
         assertThat(service.list()).extracting(ConversationInfo::conversationId)
                 .containsExactly("recent", "legacy", "older");
@@ -88,7 +88,7 @@ class ConversationServiceTest {
     void metadataMustBeCommittedBeforeExecutionAndActivityFailureDoesNotHideExecutionFailure() {
         var runtime = mock(AgentRuntime.class);
         var store = spy(sessions());
-        var service = new ConversationService(runtime, store, transcripts());
+        var service = new ConversationService(runtime, store, transcripts(), TestSupport.controlSettings());
         doThrow(new IllegalStateException("binding failed")).when(store).save(any());
         assertThatThrownBy(() -> service.send("blocked", TestSupport.message("hello", directory)))
                 .hasMessage("binding failed");
@@ -96,7 +96,7 @@ class ConversationServiceTest {
 
         reset(store);
         doCallRealMethod().doThrow(new IllegalStateException("activity failed")).when(store).save(any());
-        when(runtime.chat(anyString(), anyString(), any(), anyList(), any()))
+        when(runtime.chat(anyString(), anyString(), any(), anyList(), any(), any()))
                 .thenThrow(new IllegalStateException("model failed"));
         assertThatThrownBy(() -> service.send("failed", TestSupport.message("hello", directory)))
                 .hasMessage("model failed");

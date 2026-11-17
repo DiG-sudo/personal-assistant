@@ -59,6 +59,25 @@ public class ChatController {
         this.tools = tools;
     }
 
+    @PostMapping("/api/control/open")
+    public com.guodi.assistant.config.AssistantProperties.Control openControl(
+            @Valid @RequestBody ControlRequest request) {
+        return conversations.openControl(request.conversationId());
+    }
+
+    @PostMapping("/api/control/heartbeat")
+    public ResponseEntity<?> heartbeat(@Valid @RequestBody ControlRequest request) {
+        if (!conversations.heartbeat(request.conversationId())) {
+            return ResponseEntity.status(409).body(Map.of("error", "Window control expired; reopen the session."));
+        }
+        return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("/api/control/cancel")
+    public Map<String, Boolean> cancel(@Valid @RequestBody ControlRequest request) {
+        return Map.of("accepted", conversations.cancel(request.conversationId()));
+    }
+
     @PostMapping("/api/chat")
     public ResponseEntity<?> chat(@Valid @RequestBody Request request) {
         Reply reply = conversations.send(request.conversationId(), sessionMessage(request));
@@ -176,6 +195,9 @@ public class ChatController {
         return Map.of("mode", model instanceof DemoChatModel ? "demo" : "live",
                 "tools", tools.callbacks().stream().map(callback -> callback.getToolDefinition().name()).toList());
     }
+
+    public record ControlRequest(
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}") String conversationId) {}
 
     public record Request(
             @NotBlank @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}") String conversationId,

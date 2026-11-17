@@ -33,13 +33,14 @@ public final class AgentRuntime {
 
     /** Runs one admitted message through the existing Harness lifecycle. */
     public Reply chat(String conversationId, String message, Path projectPath, List<SessionMessage> steers,
-            Consumer<AgentEvent> events) {
-        return harness.aroundRun(conversationId, message, projectPath, steers, events, this::runLoop);
+            RequestControl control, Consumer<AgentEvent> events) {
+        return harness.aroundRun(conversationId, message, projectPath, steers, events, execution -> runLoop(execution, control));
     }
 
-    private void runLoop(AgentExecution execution) {
+    private void runLoop(AgentExecution execution, RequestControl control) {
         Function<Prompt, ChatResponse> modelCall = request -> callModel(execution, request);
         while (execution.modelCalls() < maxModelCalls) {
+            control.checkStopRequested();
             ChatResponse response = harness.aroundReasoning(execution,
                     prompt -> harness.aroundModelCall(execution, prompt, modelCall));
             validateResponse(response);

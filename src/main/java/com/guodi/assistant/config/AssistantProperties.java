@@ -20,7 +20,8 @@ public record AssistantProperties(
         @NotNull Resource systemPrompt,
         String shellImage,
         @NotNull @Valid Model model,
-        @NotNull @Valid Budget budget) {
+        @NotNull @Valid Budget budget,
+        @DefaultValue @NotNull @Valid Control control) {
 
     public enum Provider { DEMO, OPENAI }
     public enum OutputTokenParameter { MAX_TOKENS, MAX_COMPLETION_TOKENS }
@@ -30,6 +31,17 @@ public record AssistantProperties(
             @DefaultValue("131072") @Min(1) int contextWindowTokens,
             @DefaultValue("32768") @Min(1) int maxOutputTokens,
             @DefaultValue("max-tokens") @NotNull OutputTokenParameter outputTokenParameter) {}
+
+    public record Control(
+            @DefaultValue("5") @Min(1) int heartbeatIntervalSeconds,
+            @DefaultValue("3") @Min(1) int heartbeatRequestTimeoutSeconds,
+            @DefaultValue("30") @Min(1) int heartbeatTimeoutSeconds) {
+        public Control {
+            if (heartbeatTimeoutSeconds <= heartbeatIntervalSeconds) {
+                throw new IllegalArgumentException("Heartbeat timeout must exceed the sending interval");
+            }
+        }
+    }
 
     public record Budget(
             @Min(1) int windowTokens,
