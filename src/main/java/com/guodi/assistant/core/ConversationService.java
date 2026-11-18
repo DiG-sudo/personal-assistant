@@ -16,6 +16,7 @@ import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.guodi.assistant.component.tool.SandboxCleanup;
 import com.guodi.assistant.component.storage.FileConversationStore;
 import com.guodi.assistant.component.storage.FileSessionStore;
 import com.guodi.assistant.domain.ConversationInfo;
@@ -31,13 +32,15 @@ public final class ConversationService {
     private final ConcurrentHashMap<String, Session> sessions = new ConcurrentHashMap<>();
     private final AgentRuntime runtime;
     private final Control controlSettings;
+    private final SandboxCleanup cleanup;
 
     public ConversationService(AgentRuntime runtime, FileSessionStore sessionStore, FileConversationStore transcripts,
-            Control controlSettings) {
+            Control controlSettings, SandboxCleanup cleanup) {
         this.runtime = runtime;
         this.sessionStore = sessionStore;
         this.transcripts = transcripts;
         this.controlSettings = controlSettings;
+        this.cleanup = cleanup;
     }
 
     public List<ConversationInfo> list() {
@@ -126,6 +129,16 @@ public final class ConversationService {
         return session != null && session.cancel();
     }
 
+    public void reclaimExpiredSessions() {
+        for (Session session : sessions.values()) {
+            try {
+                session.reclaimExpired();
+            } catch (RuntimeException error) {
+                log.warn("Could not reclaim resources for conversation {}", session.conversationId, error);
+            }
+        }
+    }
+
     private Session session(String conversationId) {
         return sessions.computeIfAbsent(conversationId, id -> new Session(id));
     }
@@ -136,13 +149,43 @@ public final class ConversationService {
         private final ReentrantLock executionLock = new ReentrantLock(true);
         private volatile SteerBuffer steerBuffer;
         private RequestControl control;
+        private boolean resourcesReclaimed;
 
         Session(String conversationId) {
             this.conversationId = conversationId;
         }
 
-        synchronized void openControl() {
-            control = newControl();
+        void openControl() {
+            if (!executionLock.tryLock()) {
+                throw new AgentException("The previous task is still finishing; reopen the session after it stops.");
+            }
+            try {
+                synchronized (this) {
+                    if (control != null) reclaimResources();
+                    control = newControl();
+                    resourcesReclaimed = false;
+                }
+            } finally {
+                executionLock.unlock();
+            }
+        }
+
+        void reclaimExpired() {
+            if (!executionLock.tryLock()) return;
+            try {
+                synchronized (this) {
+                    if (control != null && control.expired()) reclaimResources();
+                }
+            } finally {
+                executionLock.unlock();
+            }
+        }
+
+        private void reclaimResources() {
+            if (resourcesReclaimed) return;
+            sessionStore.load(conversationId).map(ConversationInfo::projectPath)
+                    .ifPresent(path -> cleanup.reset(Path.of(path)));
+            resourcesReclaimed = true;
         }
 
         private RequestControl newControl() {

@@ -120,6 +120,7 @@ final class TestSupport {
             com.guodi.assistant.core.AgentRuntime runtime) {
         var sessions = new com.guodi.assistant.component.storage.FileSessionStore(directory.resolve("sessions"),
                 new JsonFiles(new ObjectMapper().findAndRegisterModules()));
-        return new com.guodi.assistant.core.ConversationService(runtime, sessions, store(directory), controlSettings());
+        return new com.guodi.assistant.core.ConversationService(runtime, sessions, store(directory), controlSettings(),
+                org.mockito.Mockito.mock(com.guodi.assistant.component.tool.SandboxCleanup.class));
     }
 }

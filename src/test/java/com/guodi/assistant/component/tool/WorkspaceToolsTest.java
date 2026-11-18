@@ -107,7 +107,7 @@ class WorkspaceToolsTest {
         var definition = ToolCallbacks.from(shell)[0].getToolDefinition();
         assertThat(definition.description()).contains("in a Linux sandbox", "without docker exec or docker run prefixes",
                 "{\"command\":\"git status\"}", "{\"command\":\"npm test\"}");
-        assertThat(definition.inputSchema()).contains("Timeout in seconds: 1-120 (default: 30)")
+        assertThat(definition.inputSchema()).contains("Timeout in seconds: 1-120 (default: 30)", "run_in_background")
                 .doesNotContain("projectPath", "context");
         String name = SandboxShell.containerName(project);
         assertThat(SandboxShell.containerName(project)).isEqualTo(name);
@@ -126,7 +126,7 @@ class WorkspaceToolsTest {
                         name, "/bin/sh", "-c", command);
         assertThat(shell.executeArguments(name, Path.of(""), command))
                 .containsSequence("--workdir", "/workspace");
-        assertThatThrownBy(() -> shell.execute(command, "..", 30, context)).hasMessageContaining("traversal");
-        assertThatThrownBy(() -> shell.execute(command, ".", 121, context)).hasMessageContaining("120");
+        assertThatThrownBy(() -> shell.execute(command, "..", 30, false, context)).hasMessageContaining("traversal");
+        assertThatThrownBy(() -> shell.execute(command, ".", 121, false, context)).hasMessageContaining("120");
     }
 }

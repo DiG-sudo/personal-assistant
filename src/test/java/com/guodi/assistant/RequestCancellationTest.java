@@ -22,6 +22,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import com.guodi.assistant.component.storage.FileSessionStore;
 import com.guodi.assistant.component.storage.JsonFiles;
 import com.guodi.assistant.config.AssistantProperties.Control;
+import com.guodi.assistant.component.tool.SandboxCleanup;
 import com.guodi.assistant.core.AgentRuntime;
 import com.guodi.assistant.core.AssistantHarness;
 import com.guodi.assistant.core.ConversationService;
@@ -30,6 +31,7 @@ import com.guodi.assistant.domain.TranscriptMessage;
 import com.guodi.assistant.web.ChatController;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -54,6 +56,8 @@ class RequestCancellationTest {
                     .hasCauseInstanceOf(CancellationException.class);
             fixture.assertClosedFailedTurn();
             fixture.cancel(false);
+            fixture.service.reclaimExpiredSessions();
+            verifyNoInteractions(fixture.cleanup);
             assertThat(fixture.service.send("chat", TestSupport.message("continue", directory)).answer())
                     .isEqualTo("done");
             assertThat(fixture.store.load("chat").getLast().status()).isEqualTo(ConversationTurn.Status.COMPLETED);
@@ -75,11 +79,19 @@ class RequestCancellationTest {
             // Simulate the CLI process disappearing while a tool is still running.
             Thread.sleep(2200);
             fixture.heartbeat(409);
+            fixture.service.reclaimExpiredSessions();
+            verifyNoInteractions(fixture.cleanup);
+            assertThatThrownBy(() -> fixture.service.openControl("chat"))
+                    .isInstanceOf(com.guodi.assistant.core.AgentException.class)
+                    .hasMessageContaining("previous task is still finishing");
             assertThat(task.isDone()).isFalse();
             fixture.step.release.countDown();
             assertThatThrownBy(() -> task.get(5, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
                     .hasCauseInstanceOf(CancellationException.class);
             fixture.assertClosedFailedTurn();
+            fixture.service.reclaimExpiredSessions();
+            fixture.service.reclaimExpiredSessions();
+            verify(fixture.cleanup, times(1)).reset(directory);
             fixture.heartbeat(409);
             fixture.open();
             fixture.heartbeat(204);
@@ -93,6 +105,7 @@ class RequestCancellationTest {
 
     private class Fixture {
         final BlockingStep step = new BlockingStep();
+        final SandboxCleanup cleanup = mock(SandboxCleanup.class);
         final AtomicInteger modelCalls = new AtomicInteger();
         final com.guodi.assistant.component.storage.FileConversationStore store = TestSupport.store(directory.resolve("turns"));
         final ConversationService service;
@@ -106,7 +119,7 @@ class RequestCancellationTest {
                     TestSupport.contextBuilder(), tools, TestSupport.toolRounds(tools));
             service = new ConversationService(new AgentRuntime(model, harness, 10, 4),
                     new FileSessionStore(directory.resolve("sessions"), new JsonFiles(new ObjectMapper().findAndRegisterModules())),
-                    store, new Control(1, 1, timeoutSeconds));
+                    store, new Control(1, 1, timeoutSeconds), cleanup);
             http = MockMvcBuilders.standaloneSetup(new ChatController(service, harness, model, tools)).build();
         }
 
