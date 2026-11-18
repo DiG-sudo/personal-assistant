@@ -64,10 +64,10 @@ class SandboxShellTest {
             when(process.waitFor(anyLong(), any(TimeUnit.class))).thenReturn(true);
             when(process.exitValue()).thenReturn(0);
         })) {
-            assertThat(shell.execute("git status", null, 30, context)).isEqualTo("Exit code: 0\n" + commandOutput);
-            shell.execute("npm test", null, 30, context);
+            assertThat(shell.execute("git status", null, 30, null, context)).isEqualTo("Exit code: 0\n" + commandOutput);
+            shell.execute("npm test", null, 30, null, context);
             running.set(false);
-            shell.execute("git diff", null, 30, context);
+            shell.execute("git diff", null, 30, null, context);
         }
         assertThat(commands.stream().filter(args -> args.get(1).equals("create")).count()).isEqualTo(1);
         assertThat(commands.stream().filter(args -> args.get(1).equals("start")).count()).isEqualTo(2);

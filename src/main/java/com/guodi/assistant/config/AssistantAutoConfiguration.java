@@ -6,6 +6,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -35,6 +37,7 @@ import com.guodi.assistant.component.storage.FileContextStore;
 import com.guodi.assistant.component.storage.ToolResultStore;
 import com.guodi.assistant.component.storage.JsonFiles;
 import com.guodi.assistant.component.storage.FileSessionStore;
+import com.guodi.assistant.component.tool.SandboxCleanup;
 import com.guodi.assistant.component.tool.ToolBinding;
 import com.guodi.assistant.component.tool.ToolExecutor;
 import com.guodi.assistant.component.tool.ToolRegistry;
@@ -161,8 +164,22 @@ public class AssistantAutoConfiguration {
     }
 
     @Bean
+    SandboxCleanup sandboxCleanup() {
+        return new SandboxCleanup();
+    }
+
+    @Bean
     ConversationService conversationService(AgentRuntime runtime, FileSessionStore sessions,
-            FileConversationStore transcripts, AssistantProperties properties) {
-        return new ConversationService(runtime, sessions, transcripts, properties.control());
+            FileConversationStore transcripts, AssistantProperties properties, SandboxCleanup cleanup) {
+        return new ConversationService(runtime, sessions, transcripts, properties.control(), cleanup);
+    }
+
+    @Bean(name = "assistantSessionMonitor", destroyMethod = "shutdownNow")
+    ScheduledExecutorService assistantSessionMonitor(ConversationService conversations, AssistantProperties properties) {
+        var scheduler = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofPlatform().daemon().name("assistant-session-monitor").factory());
+        int interval = properties.control().heartbeatIntervalSeconds();
+        scheduler.scheduleWithFixedDelay(conversations::reclaimExpiredSessions, interval, interval, TimeUnit.SECONDS);
+        return scheduler;
     }
 }

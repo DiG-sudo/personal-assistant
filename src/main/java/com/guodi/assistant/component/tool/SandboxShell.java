@@ -49,7 +49,9 @@ public final class SandboxShell {
                     + " Development tools may need installation. Docker is managed outside the sandbox."
                     + " Each call starts a new shell; cd and exports do not persist between calls."
                     + " Use for git, npm, build, test, and other terminal operations."
-                    + " Returns combined output and exit code. If a dedicated tool"
+                    + " Set run_in_background to true for persistent commands; returns after launch without waiting for completion."
+                    + " Check readiness, process status, and any application logs with subsequent commands."
+                    + " Returns combined output and exit code for foreground commands. If a dedicated tool"
                     + " exists (e.g., read_file, write_file), you MUST use it instead of shell"
                     + " commands. Provide the command directly, without docker exec or docker run prefixes."
                     + " Examples: {\"command\":\"git status\"}, {\"command\":\"npm test\"}.")
@@ -58,7 +60,9 @@ public final class SandboxShell {
             @ToolParam(description = "Project-relative working directory (default: '.'). Absolute paths, '..', and symlinks are not allowed", required = false)
             String working_directory,
             @ToolParam(description = "Timeout in seconds: 1-120 (default: 30)", required = false)
-            Integer timeout, ToolContext context) throws IOException {
+            Integer timeout,
+            @ToolParam(description = "Run in the background and return after launch without waiting for completion (default: false)", required = false)
+            Boolean run_in_background, ToolContext context) throws IOException {
         if (command == null || command.isBlank()) {
             throw new IllegalArgumentException("A shell command is required");
         }
@@ -72,7 +76,14 @@ public final class SandboxShell {
             throw new IllegalArgumentException("timeout must be between 1 and 120 seconds");
         }
         String container = ensureContainer(root);
-        var result = runDocker(executeArguments(container, root.relativize(directory), command), seconds, container);
+        var arguments = executeArguments(container, root.relativize(directory), command);
+        if (Boolean.TRUE.equals(run_in_background)) {
+            arguments = new java.util.ArrayList<>(arguments);
+            arguments.add(2, "-d");
+            runDocker(arguments, seconds, container).checkedOutput();
+            return "Background command submitted. Check readiness with a subsequent command.";
+        }
+        var result = runDocker(arguments, seconds, container);
         return "Exit code: " + result.exitCode() + "\n" + result.checkedOutput();
     }
 

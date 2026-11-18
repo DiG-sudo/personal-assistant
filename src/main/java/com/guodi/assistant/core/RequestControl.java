@@ -6,9 +6,8 @@ import java.util.concurrent.CancellationException;
 /** In-memory control for one CLI window; never persisted as turn state. */
 public final class RequestControl {
     private final long heartbeatTimeoutNanos;
-    private long lastHeartbeatNanos = System.nanoTime();
-    private boolean running;
-    private boolean cancelRequested;
+    private volatile long lastHeartbeatNanos = System.nanoTime();
+    private volatile Cancellation cancellation;
 
     public RequestControl(Duration heartbeatTimeout) {
         if (heartbeatTimeout.isNegative() || heartbeatTimeout.isZero()) {
@@ -17,32 +16,38 @@ public final class RequestControl {
         heartbeatTimeoutNanos = heartbeatTimeout.toNanos();
     }
 
-    public synchronized boolean heartbeat() {
+    public boolean heartbeat() {
         if (expired()) return false;
         lastHeartbeatNanos = System.nanoTime();
         return true;
     }
 
-    public synchronized boolean requestCancel() {
-        if (!running) return false;
-        cancelRequested = true;
+    public boolean requestCancel() {
+        Cancellation active = cancellation;
+        if (active == null) return false;
+        active.requested = true;
         return true;
     }
 
-    synchronized void executionStarted() {
-        running = true;
+    void executionStarted() {
+        cancellation = new Cancellation();
     }
 
-    synchronized void executionFinished() {
-        cancelRequested = false;
-        running = false;
+    void executionFinished() {
+        cancellation = null;
     }
 
-    public synchronized void checkStopRequested() {
-        if (cancelRequested || expired()) throw new CancellationException();
+    public void checkStopRequested() {
+        Cancellation active = cancellation;
+        if ((active != null && active.requested) || expired()) throw new CancellationException();
     }
 
-    private boolean expired() {
+    boolean expired() {
         return System.nanoTime() - lastHeartbeatNanos >= heartbeatTimeoutNanos;
+    }
+
+    /** A late cancellation only changes the execution that received it. */
+    private static final class Cancellation {
+        private volatile boolean requested;
     }
 }
